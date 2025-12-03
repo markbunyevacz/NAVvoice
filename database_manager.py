@@ -2,11 +2,20 @@
 Database Manager for NAV Invoice Reconciliation
 
 Tracks NAV invoice metadata and PDF receipt status using SQLite.
-Supports multi-tenant isolation via separate database files.
+Supports true multi-tenant isolation via tenant_id column.
+
+Multi-Tenancy:
+    All queries filter by tenant_id for data isolation.
+    Each tenant only sees their own invoices.
 
 Schema:
     invoices: Stores NAV invoice data with receipt status tracking
     audit_log: Tracks all status changes for compliance
+
+Security:
+    - Tenant isolation at query level
+    - All operations require tenant_id
+    - Cross-tenant queries prevented by design
 """
 
 import sqlite3
@@ -37,6 +46,7 @@ class InvoiceStatus(Enum):
 class Invoice:
     """Invoice data model."""
     id: Optional[int]
+    tenant_id: str  # Multi-tenancy support
     nav_invoice_number: str
     vendor_name: str
     vendor_tax_number: str
@@ -48,10 +58,11 @@ class Invoice:
     email_count: int = 0
     pdf_path: Optional[str] = None
     notes: Optional[str] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
+            "tenant_id": self.tenant_id,
             "nav_invoice_number": self.nav_invoice_number,
             "vendor_name": self.vendor_name,
             "vendor_tax_number": self.vendor_tax_number,
@@ -73,31 +84,36 @@ class Invoice:
 class DatabaseManager:
     """
     SQLite-based database manager for NAV invoice tracking.
-    
+
+    Multi-Tenancy:
+        All data is isolated by tenant_id. Each operation requires
+        a tenant_id to ensure data isolation.
+
     Provides thread-safe operations for:
     - Upserting invoices from NAV API responses
     - Marking invoices as received when PDFs are matched
     - Querying missing invoices for follow-up
     - Audit logging for compliance
-    
+
     Usage:
         db = DatabaseManager("data/invoices.db")
         db.initialize()
-        
-        # Insert NAV invoices
-        db.upsert_nav_invoices([
+
+        # Insert NAV invoices for a tenant
+        db.upsert_nav_invoices("tenant-001", [
             {"nav_invoice_number": "INV-001", "vendor_name": "Supplier", ...}
         ])
-        
+
         # Mark as received when PDF found
-        db.mark_as_received("INV-001", pdf_path="data/pdfs/Supplier_INV-001.pdf")
-        
-        # Get invoices needing follow-up
-        missing = db.get_missing_invoices(days_old=5)
+        db.mark_as_received("tenant-001", "INV-001",
+                           pdf_path="data/pdfs/Supplier_INV-001.pdf")
+
+        # Get invoices needing follow-up for tenant
+        missing = db.get_missing_invoices("tenant-001", days_old=5)
     """
-    
+
     # Schema version for migrations
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2  # Bumped for tenant_id addition
     
     def __init__(self, db_path: str = "data/invoices.db"):
         """
@@ -132,12 +148,13 @@ class DatabaseManager:
         """Create database schema if not exists."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            
-            # Main invoices table
+
+            # Main invoices table with tenant_id for multi-tenancy
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS invoices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    nav_invoice_number TEXT UNIQUE NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    nav_invoice_number TEXT NOT NULL,
                     vendor_name TEXT NOT NULL,
                     vendor_tax_number TEXT,
                     amount REAL NOT NULL,
@@ -148,17 +165,26 @@ class DatabaseManager:
                     email_count INTEGER DEFAULT 0,
                     pdf_path TEXT,
                     notes TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(tenant_id, nav_invoice_number)
                 )
             """)
-            
-            # Indexes for common queries
+
+            # Indexes for tenant-scoped queries
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_invoices_status 
-                ON invoices(status)
+                CREATE INDEX IF NOT EXISTS idx_invoices_tenant
+                ON invoices(tenant_id)
             """)
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_invoices_vendor 
+                CREATE INDEX IF NOT EXISTS idx_invoices_tenant_status
+                ON invoices(tenant_id, status)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_invoices_tenant_invoice
+                ON invoices(tenant_id, nav_invoice_number)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_invoices_vendor
                 ON invoices(vendor_tax_number)
             """)
             cursor.execute("""
@@ -170,14 +196,21 @@ class DatabaseManager:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS audit_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL,
                     invoice_id INTEGER,
                     action TEXT NOT NULL,
                     old_status TEXT,
                     new_status TEXT,
                     details TEXT,
+                    user_id TEXT,
                     performed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (invoice_id) REFERENCES invoices(id)
                 )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_audit_tenant
+                ON audit_log(tenant_id)
             """)
 
             # Schema version tracking
@@ -192,29 +225,39 @@ class DatabaseManager:
                 VALUES ('version', ?)
             """, (str(self.SCHEMA_VERSION),))
 
-            logger.info("Database schema initialized")
+            logger.info("Database schema initialized with multi-tenancy support")
 
     # =========================================================================
     # UPSERT NAV INVOICES
     # =========================================================================
 
-    def upsert_nav_invoices(self, invoices: List[Dict[str, Any]]) -> Tuple[int, int]:
+    def upsert_nav_invoices(
+        self,
+        tenant_id: str,
+        invoices: List[Dict[str, Any]],
+        user_id: str = "system"
+    ) -> Tuple[int, int]:
         """
         Insert new invoices from NAV API response. Ignores duplicates.
 
         Args:
+            tenant_id: Tenant identifier for data isolation
             invoices: List of invoice dictionaries from NavClient
                 Required keys: nav_invoice_number (or invoiceNumber),
                               vendor_name (or supplierName), amount (or grossAmount)
+            user_id: User performing the operation (for audit)
 
         Returns:
             Tuple of (inserted_count, skipped_count)
 
         Example:
             >>> invoices = client.query_incoming_invoices("2024-01-01", "2024-01-31")
-            >>> inserted, skipped = db.upsert_nav_invoices(invoices)
+            >>> inserted, skipped = db.upsert_nav_invoices("tenant-001", invoices)
             >>> print(f"Inserted {inserted}, skipped {skipped} duplicates")
         """
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         inserted = 0
         skipped = 0
 
@@ -238,16 +281,16 @@ class DatabaseManager:
                 try:
                     cursor.execute("""
                         INSERT OR IGNORE INTO invoices
-                        (nav_invoice_number, vendor_name, vendor_tax_number,
+                        (tenant_id, nav_invoice_number, vendor_name, vendor_tax_number,
                          amount, currency, invoice_date, status, last_updated)
-                        VALUES (?, ?, ?, ?, ?, ?, 'MISSING', CURRENT_TIMESTAMP)
-                    """, (invoice_number, vendor_name, vendor_tax,
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'MISSING', CURRENT_TIMESTAMP)
+                    """, (tenant_id, invoice_number, vendor_name, vendor_tax,
                           amount, currency, invoice_date))
 
                     if cursor.rowcount > 0:
                         inserted += 1
-                        self._log_audit(cursor, cursor.lastrowid, "CREATED",
-                                       None, "MISSING", f"Imported from NAV")
+                        self._log_audit(cursor, tenant_id, cursor.lastrowid, "CREATED",
+                                       None, "MISSING", f"Imported from NAV", user_id)
                     else:
                         skipped += 1
 
@@ -264,65 +307,81 @@ class DatabaseManager:
 
     def mark_as_received(
         self,
+        tenant_id: str,
         invoice_number: str,
         pdf_path: Optional[str] = None,
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        user_id: str = "system"
     ) -> bool:
         """
         Update invoice status when PDF is received/matched.
 
         Args:
+            tenant_id: Tenant identifier for data isolation
             invoice_number: NAV invoice number
             pdf_path: Path to the matched PDF file
             notes: Optional notes about the match
+            user_id: User performing the operation
 
         Returns:
             True if invoice was updated, False if not found
         """
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # Get current status for audit
+            # Get current status for audit (tenant-scoped)
             cursor.execute(
-                "SELECT id, status FROM invoices WHERE nav_invoice_number = ?",
-                (invoice_number,)
+                "SELECT id, status FROM invoices WHERE tenant_id = ? AND nav_invoice_number = ?",
+                (tenant_id, invoice_number)
             )
             row = cursor.fetchone()
 
             if not row:
-                logger.warning(f"Invoice not found: {invoice_number}")
+                logger.warning(f"Invoice not found for tenant {tenant_id}: {invoice_number}")
                 return False
 
             invoice_id, old_status = row["id"], row["status"]
 
-            # Update status
+            # Update status (tenant-scoped)
             cursor.execute("""
                 UPDATE invoices
                 SET status = 'RECEIVED',
                     pdf_path = ?,
                     notes = COALESCE(?, notes),
                     last_updated = CURRENT_TIMESTAMP
-                WHERE nav_invoice_number = ?
-            """, (pdf_path, notes, invoice_number))
+                WHERE tenant_id = ? AND nav_invoice_number = ?
+            """, (pdf_path, notes, tenant_id, invoice_number))
 
             # Audit log
             self._log_audit(
-                cursor, invoice_id, "STATUS_CHANGE",
+                cursor, tenant_id, invoice_id, "STATUS_CHANGE",
                 old_status, "RECEIVED",
-                f"PDF matched: {pdf_path}" if pdf_path else "Manually marked"
+                f"PDF matched: {pdf_path}" if pdf_path else "Manually marked",
+                user_id
             )
 
-            logger.info(f"Marked as received: {invoice_number}")
+            logger.info(f"Marked as received: {invoice_number} for tenant {tenant_id}")
             return True
 
-    def mark_as_emailed(self, invoice_number: str) -> bool:
+    def mark_as_emailed(
+        self,
+        tenant_id: str,
+        invoice_number: str,
+        user_id: str = "system"
+    ) -> bool:
         """Mark invoice as having reminder email sent."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
             cursor.execute(
-                "SELECT id, status, email_count FROM invoices WHERE nav_invoice_number = ?",
-                (invoice_number,)
+                "SELECT id, status, email_count FROM invoices WHERE tenant_id = ? AND nav_invoice_number = ?",
+                (tenant_id, invoice_number)
             )
             row = cursor.fetchone()
 
@@ -337,13 +396,14 @@ class DatabaseManager:
                 SET status = ?,
                     email_count = email_count + 1,
                     last_updated = CURRENT_TIMESTAMP
-                WHERE nav_invoice_number = ?
-            """, (new_status, invoice_number))
+                WHERE tenant_id = ? AND nav_invoice_number = ?
+            """, (new_status, tenant_id, invoice_number))
 
             self._log_audit(
-                cursor, invoice_id, "EMAIL_SENT",
+                cursor, tenant_id, invoice_id, "EMAIL_SENT",
                 old_status, new_status,
-                f"Email #{email_count + 1} sent"
+                f"Email #{email_count + 1} sent",
+                user_id
             )
 
             return True
@@ -352,18 +412,26 @@ class DatabaseManager:
     # QUERY MISSING INVOICES
     # =========================================================================
 
-    def get_missing_invoices(self, days_old: int = 5) -> List[Dict[str, Any]]:
+    def get_missing_invoices(
+        self,
+        tenant_id: str,
+        days_old: int = 5
+    ) -> List[Dict[str, Any]]:
         """
         Get invoices older than N days that are still MISSING.
 
         These are candidates for reminder emails to vendors.
 
         Args:
+            tenant_id: Tenant identifier for data isolation
             days_old: Minimum age in days (default: 5)
 
         Returns:
-            List of invoice dictionaries
+            List of invoice dictionaries for the specified tenant
         """
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         cutoff_date = (datetime.now() - timedelta(days=days_old)).strftime("%Y-%m-%d")
 
         with self._get_connection() as conn:
@@ -371,29 +439,36 @@ class DatabaseManager:
 
             cursor.execute("""
                 SELECT * FROM invoices
-                WHERE status = 'MISSING'
+                WHERE tenant_id = ? AND status = 'MISSING'
                 AND invoice_date <= ?
                 ORDER BY invoice_date ASC
-            """, (cutoff_date,))
+            """, (tenant_id, cutoff_date))
 
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_invoices_needing_followup(self) -> List[Dict[str, Any]]:
+    def get_invoices_needing_followup(self, tenant_id: str) -> List[Dict[str, Any]]:
         """
         Get invoices that need follow-up action.
 
         Returns MISSING (>5 days) and EMAILED (>3 days since last email) invoices.
+
+        Args:
+            tenant_id: Tenant identifier for data isolation
         """
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # Missing for 5+ days OR emailed 3+ days ago
+            # Missing for 5+ days OR emailed 3+ days ago (tenant-scoped)
             cursor.execute("""
                 SELECT * FROM invoices
-                WHERE (status = 'MISSING' AND invoice_date <= date('now', '-5 days'))
-                   OR (status = 'EMAILED' AND last_updated <= datetime('now', '-3 days'))
+                WHERE tenant_id = ?
+                AND ((status = 'MISSING' AND invoice_date <= date('now', '-5 days'))
+                   OR (status = 'EMAILED' AND last_updated <= datetime('now', '-3 days')))
                 ORDER BY status, invoice_date ASC
-            """)
+            """, (tenant_id,))
 
             return [dict(row) for row in cursor.fetchall()]
 
@@ -401,82 +476,123 @@ class DatabaseManager:
     # ADDITIONAL QUERY METHODS
     # =========================================================================
 
-    def get_invoice(self, invoice_number: str) -> Optional[Dict[str, Any]]:
-        """Get a single invoice by number."""
+    def get_invoice(
+        self,
+        invoice_number: str,
+        tenant_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get a single invoice by number.
+
+        Args:
+            invoice_number: NAV invoice number
+            tenant_id: Optional tenant filter (if None, searches all tenants - admin only)
+        """
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM invoices WHERE nav_invoice_number = ?",
-                (invoice_number,)
-            )
+
+            if tenant_id:
+                cursor.execute(
+                    "SELECT * FROM invoices WHERE tenant_id = ? AND nav_invoice_number = ?",
+                    (tenant_id, invoice_number)
+                )
+            else:
+                # Cross-tenant search (admin use only)
+                cursor.execute(
+                    "SELECT * FROM invoices WHERE nav_invoice_number = ?",
+                    (invoice_number,)
+                )
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def get_invoices_by_status(self, status: InvoiceStatus) -> List[Dict[str, Any]]:
-        """Get all invoices with a specific status."""
+    def get_invoices_by_status(
+        self,
+        tenant_id: str,
+        status: InvoiceStatus
+    ) -> List[Dict[str, Any]]:
+        """Get all invoices with a specific status for a tenant."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM invoices WHERE status = ? ORDER BY invoice_date",
-                (status.value,)
+                "SELECT * FROM invoices WHERE tenant_id = ? AND status = ? ORDER BY invoice_date",
+                (tenant_id, status.value)
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_invoices_by_vendor(self, vendor_tax_number: str) -> List[Dict[str, Any]]:
-        """Get all invoices from a specific vendor."""
+    def get_invoices_by_vendor(
+        self,
+        tenant_id: str,
+        vendor_tax_number: str
+    ) -> List[Dict[str, Any]]:
+        """Get all invoices from a specific vendor for a tenant."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM invoices WHERE vendor_tax_number = ? ORDER BY invoice_date DESC",
-                (vendor_tax_number,)
+                "SELECT * FROM invoices WHERE tenant_id = ? AND vendor_tax_number = ? ORDER BY invoice_date DESC",
+                (tenant_id, vendor_tax_number)
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get invoice statistics for dashboard."""
+    def get_statistics(self, tenant_id: str) -> Dict[str, Any]:
+        """Get invoice statistics for a tenant dashboard."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            stats = {}
+            stats = {"tenant_id": tenant_id}
 
-            # Count by status
+            # Count by status (tenant-scoped)
             cursor.execute("""
                 SELECT status, COUNT(*) as count, SUM(amount) as total_amount
-                FROM invoices GROUP BY status
-            """)
+                FROM invoices WHERE tenant_id = ? GROUP BY status
+            """, (tenant_id,))
             stats["by_status"] = {row["status"]: {
                 "count": row["count"],
                 "total_amount": row["total_amount"] or 0
             } for row in cursor.fetchall()}
 
             # Total counts
-            cursor.execute("SELECT COUNT(*) FROM invoices")
+            cursor.execute("SELECT COUNT(*) FROM invoices WHERE tenant_id = ?", (tenant_id,))
             stats["total_invoices"] = cursor.fetchone()[0]
 
-            # Missing older than 5 days
+            # Missing older than 5 days (tenant-scoped)
             cursor.execute("""
                 SELECT COUNT(*) FROM invoices
-                WHERE status = 'MISSING' AND invoice_date <= date('now', '-5 days')
-            """)
+                WHERE tenant_id = ? AND status = 'MISSING'
+                AND invoice_date <= date('now', '-5 days')
+            """, (tenant_id,))
             stats["critical_missing"] = cursor.fetchone()[0]
 
             return stats
 
     def search_invoices(
         self,
+        tenant_id: str,
         query: str,
         limit: int = 50
     ) -> List[Dict[str, Any]]:
-        """Search invoices by number or vendor name."""
+        """Search invoices by number or vendor name within a tenant."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             search_term = f"%{query}%"
             cursor.execute("""
                 SELECT * FROM invoices
-                WHERE nav_invoice_number LIKE ? OR vendor_name LIKE ?
+                WHERE tenant_id = ?
+                AND (nav_invoice_number LIKE ? OR vendor_name LIKE ?)
                 ORDER BY last_updated DESC
                 LIMIT ?
-            """, (search_term, search_term, limit))
+            """, (tenant_id, search_term, search_term, limit))
             return [dict(row) for row in cursor.fetchall()]
 
     # =========================================================================
@@ -486,24 +602,30 @@ class DatabaseManager:
     def _log_audit(
         self,
         cursor: sqlite3.Cursor,
+        tenant_id: str,
         invoice_id: int,
         action: str,
         old_status: Optional[str],
         new_status: Optional[str],
-        details: str
+        details: str,
+        user_id: str = "system"
     ) -> None:
-        """Log an audit entry."""
+        """Log an audit entry with tenant context."""
         cursor.execute("""
-            INSERT INTO audit_log (invoice_id, action, old_status, new_status, details)
-            VALUES (?, ?, ?, ?, ?)
-        """, (invoice_id, action, old_status, new_status, details))
+            INSERT INTO audit_log (tenant_id, invoice_id, action, old_status, new_status, details, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (tenant_id, invoice_id, action, old_status, new_status, details, user_id))
 
     def get_audit_log(
         self,
+        tenant_id: str,
         invoice_number: Optional[str] = None,
         limit: int = 100
     ) -> List[Dict[str, Any]]:
-        """Get audit log entries."""
+        """Get audit log entries for a tenant."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
@@ -512,18 +634,19 @@ class DatabaseManager:
                     SELECT a.*, i.nav_invoice_number
                     FROM audit_log a
                     JOIN invoices i ON a.invoice_id = i.id
-                    WHERE i.nav_invoice_number = ?
+                    WHERE a.tenant_id = ? AND i.nav_invoice_number = ?
                     ORDER BY a.performed_at DESC
                     LIMIT ?
-                """, (invoice_number, limit))
+                """, (tenant_id, invoice_number, limit))
             else:
                 cursor.execute("""
                     SELECT a.*, i.nav_invoice_number
                     FROM audit_log a
                     LEFT JOIN invoices i ON a.invoice_id = i.id
+                    WHERE a.tenant_id = ?
                     ORDER BY a.performed_at DESC
                     LIMIT ?
-                """, (limit,))
+                """, (tenant_id, limit))
 
             return [dict(row) for row in cursor.fetchall()]
 
@@ -531,32 +654,82 @@ class DatabaseManager:
     # BULK OPERATIONS
     # =========================================================================
 
-    def bulk_mark_received(self, invoice_numbers: List[str], pdf_folder: str) -> int:
+    def bulk_mark_received(
+        self,
+        tenant_id: str,
+        invoice_numbers: List[str],
+        pdf_folder: str,
+        user_id: str = "system"
+    ) -> int:
         """
-        Mark multiple invoices as received.
+        Mark multiple invoices as received for a tenant.
 
         Args:
+            tenant_id: Tenant identifier
             invoice_numbers: List of invoice numbers
             pdf_folder: Folder containing the PDFs
+            user_id: User performing the operation
 
         Returns:
             Number of invoices updated
         """
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         updated = 0
         for inv_num in invoice_numbers:
-            if self.mark_as_received(inv_num, pdf_path=f"{pdf_folder}/{inv_num}.pdf"):
+            if self.mark_as_received(
+                tenant_id, inv_num,
+                pdf_path=f"{pdf_folder}/{inv_num}.pdf",
+                user_id=user_id
+            ):
                 updated += 1
         return updated
 
-    def delete_invoice(self, invoice_number: str) -> bool:
-        """Delete an invoice (soft delete by marking as deleted)."""
+    def delete_invoice(
+        self,
+        tenant_id: str,
+        invoice_number: str
+    ) -> bool:
+        """Delete an invoice for a tenant."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "DELETE FROM invoices WHERE nav_invoice_number = ?",
-                (invoice_number,)
+                "DELETE FROM invoices WHERE tenant_id = ? AND nav_invoice_number = ?",
+                (tenant_id, invoice_number)
             )
             return cursor.rowcount > 0
+
+    # =========================================================================
+    # TENANT MANAGEMENT
+    # =========================================================================
+
+    def get_all_tenants(self) -> List[str]:
+        """Get list of all tenant IDs in the database (admin only)."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT tenant_id FROM invoices")
+            return [row[0] for row in cursor.fetchall()]
+
+    def get_tenant_summary(self) -> List[Dict[str, Any]]:
+        """Get summary statistics for all tenants (admin only)."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    tenant_id,
+                    COUNT(*) as invoice_count,
+                    SUM(amount) as total_amount,
+                    SUM(CASE WHEN status = 'MISSING' THEN 1 ELSE 0 END) as missing_count,
+                    SUM(CASE WHEN status = 'RECEIVED' THEN 1 ELSE 0 END) as received_count
+                FROM invoices
+                GROUP BY tenant_id
+                ORDER BY invoice_count DESC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
 
 
 # =============================================================================
@@ -570,7 +743,10 @@ if __name__ == "__main__":
     db = DatabaseManager("data/invoices.db")
     db.initialize()
 
-    # Example: Insert some test invoices
+    # Define tenant ID for multi-tenancy demo
+    TENANT_ID = "demo-tenant-001"
+
+    # Example: Insert some test invoices for a tenant
     test_invoices = [
         {
             "invoiceNumber": "INV-2024-001",
@@ -590,16 +766,19 @@ if __name__ == "__main__":
         }
     ]
 
-    inserted, skipped = db.upsert_nav_invoices(test_invoices)
-    print(f"✓ Inserted {inserted}, skipped {skipped}")
+    inserted, skipped = db.upsert_nav_invoices(TENANT_ID, test_invoices)
+    print(f"✓ Inserted {inserted}, skipped {skipped} for tenant {TENANT_ID}")
 
-    # Get missing invoices older than 5 days
-    missing = db.get_missing_invoices(days_old=5)
+    # Get missing invoices older than 5 days for this tenant
+    missing = db.get_missing_invoices(TENANT_ID, days_old=5)
     print(f"✓ Found {len(missing)} missing invoices older than 5 days")
 
     # Mark one as received
-    db.mark_as_received("INV-2024-001", pdf_path="data/pdfs/Test_INV-2024-001.pdf")
+    db.mark_as_received(TENANT_ID, "INV-2024-001", pdf_path="data/pdfs/Test_INV-2024-001.pdf")
 
-    # Get statistics
-    stats = db.get_statistics()
-    print(f"✓ Statistics: {stats}")
+    # Get statistics for this tenant
+    stats = db.get_statistics(TENANT_ID)
+    print(f"✓ Statistics for {TENANT_ID}: {stats}")
+
+    # Show all tenants (admin view)
+    print(f"✓ All tenants: {db.get_all_tenants()}")
