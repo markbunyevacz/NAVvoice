@@ -37,12 +37,31 @@ NAMESPACES = {
 
 
 class NavErrorCode(Enum):
-    """Standard NAV API error codes that warrant retry"""
+    """
+    NAV API error codes.
+
+    Retryable errors: Transient failures that may succeed on retry
+    Non-retryable errors: Permanent failures requiring code/data fixes
+    Validation errors: Sept 2025 blocking validation errors
+    """
+    # Retryable errors (transient failures)
     OPERATION_FAILED = "OPERATION_FAILED"
     MAINTENANCE = "MAINTENANCE"
     TOO_MANY_REQUESTS = "TOO_MANY_REQUESTS"
     TECHNICAL_ERROR = "TECHNICAL_ERROR"
     TIMEOUT = "TIMEOUT"
+
+    # Non-retryable errors (permanent failures)
+    INVALID_REQUEST_SIGNATURE = "INVALID_REQUEST_SIGNATURE"
+    INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
+    INVALID_EXCHANGE_KEY = "INVALID_EXCHANGE_KEY"
+    EMPTY_TOKEN = "EMPTY_TOKEN"
+    TOKEN_DECRYPTION_FAILED = "TOKEN_DECRYPTION_FAILED"
+
+    # September 2025 validation errors (will become blocking)
+    VAT_RATE_MISMATCH = "435"  # VAT rate doesn't match tax number
+    VAT_SUMMARY_MISMATCH = "734"  # VAT summary calculation error
+    VAT_LINE_ITEM_ERROR = "1311"  # VAT line item inconsistency
 
 
 @dataclass
@@ -53,7 +72,7 @@ class NavCredentials:
     signature_key: str            # XML signing key (32 chars)
     replacement_key: str          # Key replacement (32 chars)
     tax_number: str              # Company tax number (8 digits)
-    
+
     def __post_init__(self):
         if len(self.signature_key) != 32:
             raise ValueError("Signature key must be exactly 32 characters")
@@ -70,21 +89,32 @@ class NavApiError(Exception):
         self.message = message
         self.technical_message = technical_message
         super().__init__(f"NAV API Error [{code}]: {message}")
-    
+
     @property
     def is_retryable(self) -> bool:
-        """Check if this error warrants a retry attempt"""
-        retryable_codes = [e.value for e in NavErrorCode]
+        """
+        Check if this error warrants a retry attempt.
+
+        Only transient errors (OPERATION_FAILED, MAINTENANCE, etc.) are retryable.
+        Authentication errors, validation errors, and decryption errors are not.
+        """
+        retryable_codes = [
+            NavErrorCode.OPERATION_FAILED.value,
+            NavErrorCode.MAINTENANCE.value,
+            NavErrorCode.TOO_MANY_REQUESTS.value,
+            NavErrorCode.TECHNICAL_ERROR.value,
+            NavErrorCode.TIMEOUT.value,
+        ]
         return self.code in retryable_codes
 
 
 class NavClient:
     """
     NAV Online Számla v3.0 API Client
-    
+
     Handles authentication, XML signature generation, and invoice queries
     according to NAV API specifications.
-    
+
     Usage:
         credentials = NavCredentials(
             login="technicalUser",
@@ -99,17 +129,17 @@ class NavClient:
             issue_date_to="2024-01-31"
         )
     """
-    
+
     SOFTWARE_ID = "HU12345678-1234"  # Replace with registered software ID
     SOFTWARE_NAME = "NAV Invoice Reconciliation"
     SOFTWARE_VERSION = "1.0.0"
     SOFTWARE_DEV_NAME = "Your Company Name"
     SOFTWARE_DEV_CONTACT = "dev@company.hu"
-    
+
     MAX_RETRIES = 3
     RETRY_DELAY_BASE = 2  # Exponential backoff base in seconds
     REQUEST_TIMEOUT = 30  # seconds
-    
+
     def __init__(
         self,
         credentials: NavCredentials,
@@ -118,7 +148,7 @@ class NavClient:
     ):
         """
         Initialize NAV API client.
-        
+
         Args:
             credentials: NAV technical user credentials
             use_test_api: Use NAV test environment (default: False)
@@ -132,6 +162,28 @@ class NavClient:
             "Content-Type": "application/xml",
             "Accept": "application/xml",
         })
+
+        # Rate limiting: NAV API enforces 1 request per second per IP
+        self._last_request_time = 0.0
+        self._rate_limit_delay = 1.0  # seconds
+
+
+    def _enforce_rate_limit(self):
+        """
+        Enforce NAV API rate limit of 1 request per second per IP address.
+
+        This method ensures compliance with NAV API rate limiting by introducing
+        a delay if the time since the last request is less than 1 second.
+
+        Per NAV specification: Exceeding the rate limit triggers cumulative
+        4-second delays on subsequent requests.
+        """
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._rate_limit_delay:
+            sleep_time = self._rate_limit_delay - elapsed
+            logger.debug(f"Rate limiting: sleeping {sleep_time:.3f}s")
+            time.sleep(sleep_time)
+        self._last_request_time = time.time()
 
     # =========================================================================
     # CRYPTOGRAPHIC METHODS (SHA-512 per NAV specification)
@@ -181,9 +233,9 @@ class NavClient:
     def _compute_request_signature(self, request_id: str, timestamp: str, additional_data: str = "") -> str:
         """
         Compute request signature per NAV v3.0 specification.
-        
+
         Formula: SHA3-512(requestId + timestamp + signatureKey + additional_data)
-        
+
         Args:
             request_id: Unique request ID (30 chars)
             timestamp: UTC timestamp in ISO format
@@ -217,13 +269,13 @@ class NavClient:
 
         etree.SubElement(user, "{%s}login" % NAMESPACES['common']).text = self.credentials.login
         etree.SubElement(user, "{%s}passwordHash" % NAMESPACES['common']).text = self._compute_password_hash()
-        
+
         # Set cryptoType explicitly
         password_hash_elem = user.find("{%s}passwordHash" % NAMESPACES['common'])
         password_hash_elem.set("cryptoType", "SHA-512")
 
         etree.SubElement(user, "{%s}taxNumber" % NAMESPACES['common']).text = self.credentials.tax_number
-        
+
         signature = self._compute_request_signature(request_id, timestamp, additional_signature_data)
         req_sig = etree.SubElement(user, "{%s}requestSignature" % NAMESPACES['common'])
         req_sig.text = signature
@@ -259,55 +311,87 @@ class NavClient:
     def _decrypt_token(self, encrypted_token: str) -> str:
         """
         Decrypt the exchange token using AES-128-ECB.
-        
+
+        Per NAV specification, the exchange key (replacement_key) is a 32-character
+        hex string representing 16 bytes for AES-128 encryption.
+
         Args:
             encrypted_token: Base64 encoded encrypted token
-            
+
         Returns:
             Decrypted token string
+
+        Raises:
+            NavApiError: If decryption fails
         """
         try:
-            # Exchange key is 32 chars hex -> 16 bytes
+            # NAV exchange key is 32 hex characters = 16 bytes for AES-128
             key_str = self.credentials.replacement_key
-            if len(key_str) == 32:
-                # Assume hex string if 32 chars (16 bytes)
-                try:
-                    key = bytes.fromhex(key_str)
-                except ValueError:
-                    # Fallback to utf-8 if not hex, but this is likely wrong for AES-128
-                    key = key_str.encode('utf-8')
-            else:
-                key = key_str.encode('utf-8')
 
-            cipher = AES.new(key, AES.MODE_ECB)
-            
+            if len(key_str) == 32:
+                # Try to interpret as hex string first (standard NAV format)
+                try:
+                    key_bytes = bytes.fromhex(key_str)
+                    logger.debug("Using hex-decoded exchange key for AES-128")
+                except ValueError:
+                    # Fallback: use first 16 bytes of UTF-8 encoded string
+                    key_bytes = key_str.encode('utf-8')[:16]
+                    logger.warning("Exchange key is not valid hex, using UTF-8 encoding (may fail)")
+            else:
+                # Non-standard key length, use first 16 bytes
+                key_bytes = key_str.encode('utf-8')[:16]
+                logger.warning(f"Exchange key length is {len(key_str)}, expected 32. Using first 16 bytes.")
+
+            # Ensure we have exactly 16 bytes for AES-128
+            if len(key_bytes) != 16:
+                raise NavApiError(
+                    "INVALID_EXCHANGE_KEY",
+                    f"Exchange key must be 16 bytes for AES-128, got {len(key_bytes)} bytes"
+                )
+
+            cipher = AES.new(key_bytes, AES.MODE_ECB)
             decoded_token = base64.b64decode(encrypted_token)
             decrypted = cipher.decrypt(decoded_token)
-            
-            # Remove padding/garbage
-            # The token is a simple string, we can strip nulls and non-printable chars
-            return decrypted.decode('utf-8').strip('\x00').strip()
-            
+
+            # Try PKCS7 unpadding first (standard padding scheme)
+            try:
+                decrypted = unpad(decrypted, AES.block_size)
+                logger.debug("Successfully removed PKCS7 padding from token")
+            except ValueError:
+                # Not PKCS7 padded, try null-byte stripping
+                logger.debug("Token not PKCS7 padded, using null-byte stripping")
+                pass
+
+            # Decode to string and strip null bytes and whitespace
+            token = decrypted.decode('utf-8').rstrip('\x00').strip()
+
+            if not token:
+                raise NavApiError("EMPTY_TOKEN", "Decrypted token is empty")
+
+            return token
+
+        except NavApiError:
+            raise
         except Exception as e:
-            logger.error(f"Failed to decrypt token: {e}")
+            logger.error(f"Token decryption failed: {e}", exc_info=True)
             raise NavApiError("TOKEN_DECRYPTION_FAILED", f"Could not decrypt token: {str(e)}")
 
     def token_exchange(self) -> str:
         """
         Obtain a session token for write operations.
-        
+
         Returns:
             Decrypted session token string
         """
         request_body = self._build_token_exchange_request()
         response = self._execute_with_retry("/tokenExchange", request_body)
-        
+
         root = etree.fromstring(response)
         encoded_token = root.findtext(".//{%s}encodedExchangeToken" % NAMESPACES['api'])
-        
+
         if not encoded_token:
             raise NavApiError("MISSING_TOKEN", "Response did not contain encodedExchangeToken")
-            
+
         return self._decrypt_token(encoded_token)
 
     def _build_software_element(self) -> etree.Element:
@@ -326,64 +410,64 @@ class NavClient:
     def manage_invoice(self, invoice_operations: List[Dict[str, Any]]) -> str:
         """
         Submit invoices (create, modify, storno) to NAV.
-        
+
         Args:
             invoice_operations: List of operation dicts containing 'index', 'operation', 'invoiceData' (base64)
-            
+
         Returns:
             Transaction ID
         """
         # 1. Get token
         token = self.token_exchange()
-        
+
         # 2. Build ManageInvoiceRequest
         request_id = self._generate_request_id()
         timestamp = self._get_utc_timestamp()
-        
+
         # Calculate additional hash components for signature
         # SHA3-512(operation + invoiceData) for each operation
         concatenated_hashes = ""
         for op in invoice_operations:
             op_str = op['operation'] + op['invoiceData']
             concatenated_hashes += self._hash_sha3_512(op_str)
-        
+
         nsmap = {
             None: NAMESPACES['api'],
             'common': NAMESPACES['common'],
         }
         root = etree.Element("ManageInvoiceRequest", nsmap=nsmap)
-        
+
         root.append(self._build_basic_header(request_id, timestamp))
         root.append(self._build_user_element(request_id, timestamp, concatenated_hashes))
         root.append(self._build_software_element())
-        
+
         etree.SubElement(root, "exchangeToken").text = token
-        
+
         ops_list = etree.SubElement(root, "invoiceOperations")
         etree.SubElement(ops_list, "compressedContent").text = "false"
-        
+
         for op in invoice_operations:
             op_elem = etree.SubElement(ops_list, "invoiceOperation")
             etree.SubElement(op_elem, "index").text = str(op['index'])
             etree.SubElement(op_elem, "invoiceOperation").text = op['operation'] # CREATE, MODIFY, STORNO
             etree.SubElement(op_elem, "invoiceData").text = op['invoiceData']
-            
+
             # Note: electronicInvoiceHash would go here for electronic invoices
-            
+
         request_body = etree.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)
-        
+
         # 3. Send
         response = self._execute_with_retry("/manageInvoice", request_body)
-        
+
         # 4. Parse transaction ID
         root_resp = etree.fromstring(response)
         transaction_id = root_resp.findtext(".//{%s}transactionId" % NAMESPACES['api'])
-        
+
         if not transaction_id:
              # Check for error if no transaction ID
              self._check_response_for_errors(response)
              raise NavApiError("MISSING_TRX_ID", "Response did not contain transactionId")
-             
+
         return transaction_id
 
     # =========================================================================
@@ -444,12 +528,12 @@ class NavClient:
             Dictionary with invoice data (including decoded base64 content)
         """
         root = etree.fromstring(response_xml)
-        
+
         # Check for errors first
         self._check_response_for_errors(response_xml)
 
         result = {}
-        
+
         # Extract invoice data (Base64)
         invoice_data_elem = root.find(".//{%s}invoiceData" % NAMESPACES['api'])
         if invoice_data_elem is not None and invoice_data_elem.text:
@@ -505,11 +589,11 @@ class NavClient:
 
         if func_code is not None and func_code.text and func_code.text != "OK":
             # errorCode and message are siblings of funcCode (inside result element)
-            
+
             error_code = self._get_text_recursive(root, "errorCode", "UNKNOWN")
             error_msg = self._get_text_recursive(root, "message", "Unknown error")
             tech_msg = self._get_text_recursive(root, "technicalDetails", "")
-            
+
             raise NavApiError(error_code, error_msg, tech_msg)
 
     def _get_text_recursive(self, element: etree.Element, tag: str, default: str = "") -> str:
@@ -518,7 +602,7 @@ class NavClient:
         child = element.find(".//" + tag)
         if child is not None and child.text:
             return child.text.strip()
-            
+
         # Try with namespaces
         for ns in NAMESPACES.values():
             child = element.find(".//{%s}%s" % (ns, tag))
@@ -556,6 +640,9 @@ class NavClient:
 
         for attempt in range(retries + 1):
             try:
+                # Enforce rate limiting before each request
+                self._enforce_rate_limit()
+
                 url = f"{self.base_url}{endpoint}"
 
                 response = self.session.post(
@@ -619,11 +706,11 @@ class NavClient:
     ) -> Dict[str, Any]:
         """
         Retrieve complete invoice data by invoice number.
-        
+
         Args:
             invoice_number: The invoice number to retrieve
             invoice_direction: "INBOUND" or "OUTBOUND"
-            
+
         Returns:
             Dictionary containing 'invoice_data_decoded' (bytes) and other metadata
         """
@@ -631,7 +718,7 @@ class NavClient:
             invoice_number=invoice_number,
             invoice_direction=invoice_direction
         )
-        
+
         response = self._execute_with_retry("/queryInvoiceData", request_body)
         return self._parse_invoice_data_response(response)
 
@@ -808,7 +895,7 @@ class NavClient:
         """
         root = etree.fromstring(response_xml)
         digests = []
-        
+
         # Parse pagination info
         try:
             available_pages = int(self._get_text(root, "availablePage", "0"))
@@ -975,7 +1062,7 @@ class NavClient:
                     "invoiceStatus": self._get_text(proc_result, "invoiceStatus", "UNKNOWN"),
                     "businessValidationMessages": []
                 }
-                
+
                 # Parse validation messages if any
                 msgs = proc_result.findall(".//{%s}businessValidationResult" % NAMESPACES['api'])
                 for msg in msgs:
@@ -985,7 +1072,7 @@ class NavClient:
                          "message": self._get_text(msg, "message", ""),
                          "pointer": self._get_text(msg, "pointer", "")
                      })
-                
+
                 result["processingResults"].append(item)
 
         return result
@@ -1114,7 +1201,7 @@ if __name__ == "__main__":
 
         if len(invoices) > 5:
             print(f"  ... and {len(invoices) - 5} more")
-            
+
         # Example of fetching full data for the first invoice
         if invoices:
             first_inv_num = invoices[0]['invoiceNumber']

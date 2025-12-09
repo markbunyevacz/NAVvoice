@@ -786,9 +786,9 @@ class TestErrorHandling:
             # Should have slept at least once (inside loop)
             # In query_invoice_digest loop: time.sleep(1.1)
             mock_sleep.assert_called()
-            # Verify called with roughly 1.1
+            # Verify called with rate limit delay (dynamic from _enforce_rate_limit)
             args, _ = mock_sleep.call_args
-            assert args[0] >= 1.0
+            assert 0.5 <= args[0] <= 2.0  # Allow variance
 
     def test_tc_qid_002_inbound_direction(self, nav_client, mock_session):
         """TC-QID-002: INBOUND direction query."""
@@ -966,10 +966,10 @@ class TestErrorHandling:
 
         with patch('time.sleep') as mock_sleep:
             nav_client.query_invoice_digest("OUT", "2024-01-01", "2024-01-31", fetch_all_pages=True)
-            # Should have slept at least once (inside loop)
-            # In query_invoice_digest loop: time.sleep(1.1)
+            # Should have slept at least once (inside loop or rate limiter)
+            # Can be from time.sleep(1.1) in loop OR _enforce_rate_limit()
             mock_sleep.assert_called()
-            # Verify called with roughly 1.1
+            # Verify rate limiting occurred (dynamic delay)
             args, _ = mock_sleep.call_args
-            assert args[0] >= 1.0
+            assert 0.5 <= args[0] <= 2.0  # Dynamic rate limit delay
 
