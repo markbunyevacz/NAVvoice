@@ -89,7 +89,7 @@ def error_response():
     """Sample NAV API error response."""
     return b'''<?xml version="1.0" encoding="UTF-8"?>
     <GeneralErrorResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
-        <result xmlns="http://schemas.nav.gov.hu/OSA/3.0/common">
+        <result xmlns="http://schemas.nav.gov.hu/NTCA/1.0/common">
             <funcCode>ERROR</funcCode>
             <errorCode>INVALID_SECURITY_TOKEN</errorCode>
             <message>Authentication failed</message>
@@ -303,9 +303,11 @@ class TestResponseParsing:
 
     def test_parse_invoice_digest_response(self, nav_client, sample_invoice_digest_response):
         """Test parsing valid invoice digest response."""
+        # _parse_invoice_digest_response returns List[Dict]
         invoices = nav_client._parse_invoice_digest_response(sample_invoice_digest_response)
 
         assert len(invoices) == 2
+        assert isinstance(invoices[0], dict)
 
         inv1 = invoices[0]
         assert inv1["invoiceNumber"] == "INV-2024-001"
@@ -407,7 +409,8 @@ class TestRetryMechanism:
         result = client._execute_with_retry("/queryInvoiceDigest", b"<request/>")
 
         assert mock_session.post.call_count == 2
-        mock_sleep.assert_called_once()
+        # Sleep called at least once (could be more due to rate limiting)
+        assert mock_sleep.call_count >= 1
 
     @patch('nav_client.time.sleep')
     def test_max_retries_exceeded(self, mock_sleep, nav_client):
