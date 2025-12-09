@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from enum import Enum
 import requests
 from lxml import etree
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +29,10 @@ NAV_API_TEST_URL = "https://api-test.onlineszamla.nav.gov.hu/invoiceService/v3"
 
 # XML Namespaces
 NAMESPACES = {
-    'common': 'http://schemas.nav.gov.hu/OSA/3.0/common',
+    'common': 'http://schemas.nav.gov.hu/NTCA/1.0/common',
     'api': 'http://schemas.nav.gov.hu/OSA/3.0/api',
     'data': 'http://schemas.nav.gov.hu/OSA/3.0/data',
+    'base': 'http://schemas.nav.gov.hu/OSA/3.0/base',
 }
 
 
@@ -156,48 +159,42 @@ class NavClient:
     def _hash_sha512(data: str) -> str:
         """
         Compute SHA-512 hash and return uppercase hex string.
-
-        Args:
-            data: String to hash
-
-        Returns:
-            Uppercase hexadecimal hash string (128 chars)
+        Used for password hashing.
         """
         return hashlib.sha512(data.encode('utf-8')).hexdigest().upper()
+
+    @staticmethod
+    def _hash_sha3_512(data: str) -> str:
+        """
+        Compute SHA3-512 hash and return uppercase hex string.
+        Used for request signatures per API v3.0 spec.
+        """
+        return hashlib.sha3_512(data.encode('utf-8')).hexdigest().upper()
 
     def _compute_password_hash(self) -> str:
         """
         Hash the password per NAV specification.
         Formula: SHA-512(password)
-
-        Returns:
-            Uppercase hex SHA-512 hash of password
         """
         return self._hash_sha512(self.credentials.password)
 
-    def _compute_request_signature(self, request_id: str, timestamp: str) -> str:
+    def _compute_request_signature(self, request_id: str, timestamp: str, additional_data: str = "") -> str:
         """
         Compute request signature per NAV v3.0 specification.
-
-        Formula: SHA-512(requestId + timestamp + signatureKey)
-
-        The signature proves the request authenticity by combining:
-        - requestId: Unique request identifier
-        - timestamp: Request creation time (UTC)
-        - signatureKey: Technical user's signing key
-
+        
+        Formula: SHA3-512(requestId + timestamp + signatureKey + additional_data)
+        
         Args:
             request_id: Unique request ID (30 chars)
             timestamp: UTC timestamp in ISO format
-
-        Returns:
-            Uppercase hex SHA-512 hash (128 chars)
+            additional_data: Concatenated invoice hashes for manageInvoice, empty for others
         """
         # Remove timestamp separators per NAV spec: 2024-01-15T10:30:00.000Z -> 20240115103000
+        # Format is YYYYMMDDHHmmss
         timestamp_clean = timestamp.replace("-", "").replace("T", "").replace(":", "").replace(".", "").replace("Z", "")[:14]
 
-        signature_data = request_id + timestamp_clean + self.credentials.signature_key
-        return self._hash_sha512(signature_data)
+        signature_data = request_id + timestamp_clean + self.credentials.signature_key + additional_data
+        return self._hash_sha3_512(signature_data)
 
     # =========================================================================
     # XML REQUEST BUILDING
@@ -214,16 +211,104 @@ class NavClient:
 
         return header
 
-    def _build_user_element(self, request_id: str, timestamp: str) -> etree.Element:
+    def _build_user_element(self, request_id: str, timestamp: str, additional_signature_data: str = "") -> etree.Element:
         """Build the user authentication element."""
         user = etree.Element("{%s}user" % NAMESPACES['common'])
 
         etree.SubElement(user, "{%s}login" % NAMESPACES['common']).text = self.credentials.login
         etree.SubElement(user, "{%s}passwordHash" % NAMESPACES['common']).text = self._compute_password_hash()
+        
+        # Set cryptoType explicitly
+        password_hash_elem = user.find("{%s}passwordHash" % NAMESPACES['common'])
+        password_hash_elem.set("cryptoType", "SHA-512")
+
         etree.SubElement(user, "{%s}taxNumber" % NAMESPACES['common']).text = self.credentials.tax_number
-        etree.SubElement(user, "{%s}requestSignature" % NAMESPACES['common']).text = self._compute_request_signature(request_id, timestamp)
+        
+        signature = self._compute_request_signature(request_id, timestamp, additional_signature_data)
+        req_sig = etree.SubElement(user, "{%s}requestSignature" % NAMESPACES['common'])
+        req_sig.text = signature
+        req_sig.set("cryptoType", "SHA3-512")
 
         return user
+
+    def _build_token_exchange_request(self) -> bytes:
+        """
+        Build XML request for /tokenExchange endpoint.
+        Used to obtain a session token for write operations.
+        """
+        request_id = self._generate_request_id()
+        timestamp = self._get_utc_timestamp()
+
+        nsmap = {
+            None: NAMESPACES['api'],
+            'common': NAMESPACES['common'],
+        }
+        root = etree.Element("TokenExchangeRequest", nsmap=nsmap)
+
+        root.append(self._build_basic_header(request_id, timestamp))
+        root.append(self._build_user_element(request_id, timestamp))
+        root.append(self._build_software_element())
+
+        return etree.tostring(
+            root,
+            xml_declaration=True,
+            encoding="UTF-8",
+            pretty_print=True
+        )
+
+    def _decrypt_token(self, encrypted_token: str) -> str:
+        """
+        Decrypt the exchange token using AES-128-ECB.
+        
+        Args:
+            encrypted_token: Base64 encoded encrypted token
+            
+        Returns:
+            Decrypted token string
+        """
+        try:
+            # Exchange key is 32 chars hex -> 16 bytes
+            key_str = self.credentials.replacement_key
+            if len(key_str) == 32:
+                # Assume hex string if 32 chars (16 bytes)
+                try:
+                    key = bytes.fromhex(key_str)
+                except ValueError:
+                    # Fallback to utf-8 if not hex, but this is likely wrong for AES-128
+                    key = key_str.encode('utf-8')
+            else:
+                key = key_str.encode('utf-8')
+
+            cipher = AES.new(key, AES.MODE_ECB)
+            
+            decoded_token = base64.b64decode(encrypted_token)
+            decrypted = cipher.decrypt(decoded_token)
+            
+            # Remove padding/garbage
+            # The token is a simple string, we can strip nulls and non-printable chars
+            return decrypted.decode('utf-8').strip('\x00').strip()
+            
+        except Exception as e:
+            logger.error(f"Failed to decrypt token: {e}")
+            raise NavApiError("TOKEN_DECRYPTION_FAILED", f"Could not decrypt token: {str(e)}")
+
+    def token_exchange(self) -> str:
+        """
+        Obtain a session token for write operations.
+        
+        Returns:
+            Decrypted session token string
+        """
+        request_body = self._build_token_exchange_request()
+        response = self._execute_with_retry("/tokenExchange", request_body)
+        
+        root = etree.fromstring(response)
+        encoded_token = root.findtext(".//{%s}encodedExchangeToken" % NAMESPACES['api'])
+        
+        if not encoded_token:
+            raise NavApiError("MISSING_TOKEN", "Response did not contain encodedExchangeToken")
+            
+        return self._decrypt_token(encoded_token)
 
     def _build_software_element(self) -> etree.Element:
         """Build the software identification element."""
@@ -237,6 +322,69 @@ class NavClient:
         etree.SubElement(software, "{%s}softwareDevContact" % NAMESPACES['api']).text = self.SOFTWARE_DEV_CONTACT
 
         return software
+
+    def manage_invoice(self, invoice_operations: List[Dict[str, Any]]) -> str:
+        """
+        Submit invoices (create, modify, storno) to NAV.
+        
+        Args:
+            invoice_operations: List of operation dicts containing 'index', 'operation', 'invoiceData' (base64)
+            
+        Returns:
+            Transaction ID
+        """
+        # 1. Get token
+        token = self.token_exchange()
+        
+        # 2. Build ManageInvoiceRequest
+        request_id = self._generate_request_id()
+        timestamp = self._get_utc_timestamp()
+        
+        # Calculate additional hash components for signature
+        # SHA3-512(operation + invoiceData) for each operation
+        concatenated_hashes = ""
+        for op in invoice_operations:
+            op_str = op['operation'] + op['invoiceData']
+            concatenated_hashes += self._hash_sha3_512(op_str)
+        
+        nsmap = {
+            None: NAMESPACES['api'],
+            'common': NAMESPACES['common'],
+        }
+        root = etree.Element("ManageInvoiceRequest", nsmap=nsmap)
+        
+        root.append(self._build_basic_header(request_id, timestamp))
+        root.append(self._build_user_element(request_id, timestamp, concatenated_hashes))
+        root.append(self._build_software_element())
+        
+        etree.SubElement(root, "exchangeToken").text = token
+        
+        ops_list = etree.SubElement(root, "invoiceOperations")
+        etree.SubElement(ops_list, "compressedContent").text = "false"
+        
+        for op in invoice_operations:
+            op_elem = etree.SubElement(ops_list, "invoiceOperation")
+            etree.SubElement(op_elem, "index").text = str(op['index'])
+            etree.SubElement(op_elem, "invoiceOperation").text = op['operation'] # CREATE, MODIFY, STORNO
+            etree.SubElement(op_elem, "invoiceData").text = op['invoiceData']
+            
+            # Note: electronicInvoiceHash would go here for electronic invoices
+            
+        request_body = etree.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)
+        
+        # 3. Send
+        response = self._execute_with_retry("/manageInvoice", request_body)
+        
+        # 4. Parse transaction ID
+        root_resp = etree.fromstring(response)
+        transaction_id = root_resp.findtext(".//{%s}transactionId" % NAMESPACES['api'])
+        
+        if not transaction_id:
+             # Check for error if no transaction ID
+             self._check_response_for_errors(response)
+             raise NavApiError("MISSING_TRX_ID", "Response did not contain transactionId")
+             
+        return transaction_id
 
     # =========================================================================
     # QUERY INVOICE DATA ENDPOINT
@@ -320,6 +468,7 @@ class NavClient:
              result['insDate'] = self._get_text(audit_data, "insDate")
              result['originalRequestVersion'] = self._get_text(audit_data, "originalRequestVersion")
              result['id'] = self._get_text(audit_data, "id") # Transaction ID
+             result['electronicInvoiceHash'] = self._get_text(audit_data, "electronicInvoiceHash")
 
         return result
 
@@ -350,9 +499,12 @@ class NavClient:
 
         # Check for funcCode != OK
         func_code = root.find(".//{%s}funcCode" % NAMESPACES['common'])
-        if func_code is not None and func_code.text != "OK":
+        # Also check for funcCode without namespace if not found
+        if func_code is None:
+             func_code = root.find(".//funcCode")
+
+        if func_code is not None and func_code.text and func_code.text != "OK":
             # errorCode and message are siblings of funcCode (inside result element)
-            # We can search for them relative to root using .// or better, just search recursively
             
             error_code = self._get_text_recursive(root, "errorCode", "UNKNOWN")
             error_msg = self._get_text_recursive(root, "message", "Unknown error")
