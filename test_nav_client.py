@@ -50,18 +50,18 @@ def sample_invoice_digest_response():
     """Sample NAV API response XML for invoice digest query."""
     return b'''<?xml version="1.0" encoding="UTF-8"?>
     <QueryInvoiceDigestResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
-        <header xmlns="http://schemas.nav.gov.hu/OSA/3.0/common">
+        <header xmlns="http://schemas.nav.gov.hu/NTCA/1.0/common">
             <requestId>ABC123</requestId>
             <timestamp>2024-01-15T10:30:00.000Z</timestamp>
             <requestVersion>3.0</requestVersion>
             <headerVersion>1.0</headerVersion>
         </header>
-        <result xmlns="http://schemas.nav.gov.hu/OSA/3.0/common">
+        <result xmlns="http://schemas.nav.gov.hu/NTCA/1.0/common">
             <funcCode>OK</funcCode>
         </result>
         <invoiceDigestResult>
-            <availablePage>1</availablePage>
             <currentPage>1</currentPage>
+            <availablePage>1</availablePage>
             <invoiceDigest>
                 <invoiceNumber>INV-2024-001</invoiceNumber>
                 <supplierName>Test Supplier Kft.</supplierName>
@@ -303,11 +303,12 @@ class TestResponseParsing:
 
     def test_parse_invoice_digest_response(self, nav_client, sample_invoice_digest_response):
         """Test parsing valid invoice digest response."""
-        # _parse_invoice_digest_response returns List[Dict]
-        invoices = nav_client._parse_invoice_digest_response(sample_invoice_digest_response)
+        # _parse_invoice_digest_response returns tuple (list, available_pages)
+        invoices, available_pages = nav_client._parse_invoice_digest_response(sample_invoice_digest_response)
 
         assert len(invoices) == 2
         assert isinstance(invoices[0], dict)
+        assert available_pages >= 0  # Can be 0 for empty results, 1 for fixture
 
         inv1 = invoices[0]
         assert inv1["invoiceNumber"] == "INV-2024-001"

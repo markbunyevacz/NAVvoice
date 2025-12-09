@@ -1,0 +1,145 @@
+# NAV Invoice Reconciliation Middleware System
+# Python 3.9+ required
+
+# ============================================================================
+# CORE NAV API CLIENT DEPENDENCIES
+# ============================================================================
+
+# HTTP requests for NAV API communication
+requests>=2.31.0,<3.0.0
+
+# XML parsing and generation (NAV API uses XML)
+lxml>=4.9.0,<6.0.0
+
+# Cryptography for AES-128-ECB token decryption
+pycryptodome>=3.18.0,<4.0.0
+
+# ============================================================================
+# PDF PROCESSING
+# ============================================================================
+
+# PDF text extraction
+PyPDF2>=3.0.0,<4.0.0
+
+# OCR support (optional, for scanned PDFs)
+# Requires system dependencies: tesseract-ocr, poppler-utils
+pytesseract>=0.3.10,<1.0.0
+pdf2image>=1.16.0,<2.0.0
+Pillow>=10.0.0,<11.0.0
+
+# ============================================================================
+# AI & EMAIL GENERATION
+# ============================================================================
+
+# Google Gemini AI for email generation
+google-generativeai>=0.3.0,<1.0.0
+
+# ============================================================================
+# AUTHENTICATION & SECURITY
+# ============================================================================
+
+# JWT token generation and validation
+PyJWT>=2.8.0,<3.0.0
+
+# Password hashing
+bcrypt>=4.0.0,<5.0.0
+
+# ============================================================================
+# GOOGLE CLOUD INTEGRATION
+# ============================================================================
+
+# Secret Manager for credential storage
+google-cloud-secret-manager>=2.16.0,<3.0.0
+
+# ============================================================================
+# DATABASE
+# ============================================================================
+
+# SQLite is built-in to Python, no external dependency needed
+# For production PostgreSQL support (optional):
+# psycopg2-binary>=2.9.0,<3.0.0
+
+# ============================================================================
+# TESTING
+# ============================================================================
+
+# Testing framework
+pytest>=7.4.0,<9.0.0
+pytest-cov>=4.1.0,<5.0.0
+pytest-mock>=3.11.0,<4.0.0
+
+# ============================================================================
+# DEVELOPMENT TOOLS
+# ============================================================================
+
+# Code formatting
+black>=23.0.0,<25.0.0
+
+# Linting
+pylint>=2.17.0,<4.0.0
+flake8>=6.0.0,<8.0.0
+
+# Type checking
+mypy>=1.4.0,<2.0.0
+
+# ============================================================================
+# WEB FRAMEWORK (for REST API endpoints)
+# ============================================================================
+
+# FastAPI for REST API
+fastapi>=0.104.0,<1.0.0
+uvicorn[standard]>=0.24.0,<1.0.0
+pydantic>=2.0.0,<3.0.0
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+# Environment variable management
+python-dotenv>=1.0.0,<2.0.0
+
+# Date/time utilities
+python-dateutil>=2.8.0,<3.0.0
+
+# Logging enhancements
+colorlog>=6.7.0,<7.0.0
+
+# ============================================================================
+# OPTIONAL: MONITORING & OBSERVABILITY
+# ============================================================================
+
+# Prometheus metrics (optional)
+# prometheus-client>=0.17.0,<1.0.0
+
+# Sentry error tracking (optional)
+# sentry-sdk>=1.32.0,<2.0.0
+
+# ============================================================================
+# NOTES
+# ============================================================================
+# 
+# System Dependencies Required:
+# - tesseract-ocr (for OCR support)
+# - poppler-utils (for pdf2image)
+# 
+# Installation on Ubuntu/Debian:
+#   sudo apt-get install tesseract-ocr poppler-utils
+# 
+# Installation on macOS:
+#   brew install tesseract poppler
+# 
+# Installation on Windows:
+#   Download from: https://github.com/UB-Mannheim/tesseract/wiki
+#                  https://github.com/oschwartz10612/poppler-windows/releases
+# 
+# Google Cloud Authentication:
+#   Set GOOGLE_APPLICATION_CREDENTIALS environment variable to service account JSON
+# 
+# NAV API Credentials:
+#   Store in Google Secret Manager or environment variables:
+#   - NAV_TECHNICAL_USER
+#   - NAV_PASSWORD
+#   - NAV_SIGNATURE_KEY (32 chars)
+#   - NAV_REPLACEMENT_KEY (32 chars hex)
+#   - NAV_TAX_NUMBER (8 digits)
+
