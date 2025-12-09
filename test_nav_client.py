@@ -15,7 +15,6 @@ from nav_client import (
     NavCredentials,
     NavApiError,
     NavErrorCode,
-    InvoiceData,
     NAMESPACES
 )
 
@@ -47,10 +46,10 @@ def nav_client(valid_credentials):
 
 
 @pytest.fixture
-def sample_invoice_response():
-    """Sample NAV API response XML for invoice query."""
+def sample_invoice_digest_response():
+    """Sample NAV API response XML for invoice digest query."""
     return b'''<?xml version="1.0" encoding="UTF-8"?>
-    <QueryInvoiceDataResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
+    <QueryInvoiceDigestResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
         <header xmlns="http://schemas.nav.gov.hu/OSA/3.0/common">
             <requestId>ABC123</requestId>
             <timestamp>2024-01-15T10:30:00.000Z</timestamp>
@@ -60,25 +59,29 @@ def sample_invoice_response():
         <result xmlns="http://schemas.nav.gov.hu/OSA/3.0/common">
             <funcCode>OK</funcCode>
         </result>
-        <invoiceDigestList>
+        <invoiceDigestResult>
+            <availablePage>1</availablePage>
+            <currentPage>1</currentPage>
             <invoiceDigest>
                 <invoiceNumber>INV-2024-001</invoiceNumber>
                 <supplierName>Test Supplier Kft.</supplierName>
                 <supplierTaxNumber>87654321</supplierTaxNumber>
                 <invoiceIssueDate>2024-01-10</invoiceIssueDate>
-                <invoiceGrossAmount>125000</invoiceGrossAmount>
-                <currencyCode>HUF</currencyCode>
+                <invoiceNetAmount>100000</invoiceNetAmount>
+                <invoiceVatAmount>25000</invoiceVatAmount>
+                <currency>HUF</currency>
             </invoiceDigest>
             <invoiceDigest>
                 <invoiceNumber>INV-2024-002</invoiceNumber>
                 <supplierName>Another Vendor Zrt.</supplierName>
                 <supplierTaxNumber>11223344</supplierTaxNumber>
                 <invoiceIssueDate>2024-01-12</invoiceIssueDate>
-                <invoiceGrossAmount>250000.50</invoiceGrossAmount>
-                <currencyCode>EUR</currencyCode>
+                <invoiceNetAmount>200000</invoiceNetAmount>
+                <invoiceVatAmount>50000.50</invoiceVatAmount>
+                <currency>EUR</currency>
             </invoiceDigest>
-        </invoiceDigestList>
-    </QueryInvoiceDataResponse>'''
+        </invoiceDigestResult>
+    </QueryInvoiceDigestResponse>'''
 
 
 @pytest.fixture
@@ -262,21 +265,33 @@ class TestXmlBuilding:
         assert software.find("{%s}softwareId" % NAMESPACES['api']).text == "HUTEST12345-0001"
         assert software.find("{%s}softwareOperation" % NAMESPACES['api']).text == "ONLINE_SERVICE"
 
-    def test_build_query_request_valid_xml(self, nav_client):
-        """Test complete query request is valid XML."""
+    def test_build_query_data_request_valid_xml(self, nav_client):
+        """Test complete query data request is valid XML."""
         request_body = nav_client._build_query_invoice_data_request(
+            invoice_number="INV-2024-001",
+            invoice_direction="INBOUND"
+        )
+
+        # Should be valid XML
+        root = etree.fromstring(request_body)
+        assert root.tag.endswith("QueryInvoiceDataRequest")
+        assert NAMESPACES['api'] in root.tag
+
+        # Should have declaration
+        assert request_body.startswith(b"<?xml")
+
+    def test_build_query_digest_request_valid_xml(self, nav_client):
+        """Test complete query digest request is valid XML."""
+        request_body = nav_client._build_query_invoice_digest_request(
             invoice_direction="INBOUND",
             issue_date_from="2024-01-01",
             issue_date_to="2024-01-31",
             page=1
         )
-
-        # Should be valid XML
+        
         root = etree.fromstring(request_body)
-        assert root.tag == "QueryInvoiceDataRequest"
-
-        # Should have declaration
-        assert request_body.startswith(b"<?xml")
+        assert root.tag.endswith("QueryInvoiceDigestRequest")
+        assert NAMESPACES['api'] in root.tag
 
 
 # =============================================================================
@@ -286,39 +301,22 @@ class TestXmlBuilding:
 class TestResponseParsing:
     """Test XML response parsing."""
 
-    def test_parse_invoice_response(self, nav_client, sample_invoice_response):
-        """Test parsing valid invoice response."""
-        invoices = nav_client._parse_invoice_response(sample_invoice_response)
+    def test_parse_invoice_digest_response(self, nav_client, sample_invoice_digest_response):
+        """Test parsing valid invoice digest response."""
+        invoices = nav_client._parse_invoice_digest_response(sample_invoice_digest_response)
 
         assert len(invoices) == 2
 
         inv1 = invoices[0]
-        assert inv1.invoice_number == "INV-2024-001"
-        assert inv1.supplier_name == "Test Supplier Kft."
-        assert inv1.gross_amount == 125000.0
-        assert inv1.currency == "HUF"
+        assert inv1["invoiceNumber"] == "INV-2024-001"
+        assert inv1["supplierName"] == "Test Supplier Kft."
+        assert inv1["invoiceNetAmount"] == 100000.0
+        assert inv1["invoiceVatAmount"] == 25000.0
+        assert inv1["currency"] == "HUF"
 
         inv2 = invoices[1]
-        assert inv2.invoice_number == "INV-2024-002"
-        assert inv2.gross_amount == 250000.50
-        assert inv2.currency == "EUR"
-
-    def test_invoice_to_dict(self):
-        """Test InvoiceData.to_dict() output format."""
-        invoice = InvoiceData(
-            invoice_number="TEST-001",
-            supplier_name="Supplier",
-            supplier_tax_number="12345678",
-            invoice_date="2024-01-15",
-            gross_amount=100000.0,
-            currency="HUF"
-        )
-
-        result = invoice.to_dict()
-
-        assert result["invoiceNumber"] == "TEST-001"
-        assert result["supplierName"] == "Supplier"
-        assert result["grossAmount"] == 100000.0
+        assert inv2["invoiceNumber"] == "INV-2024-002"
+        assert inv2["currency"] == "EUR"
 
 
 # =============================================================================
@@ -369,32 +367,32 @@ class TestRetryMechanism:
     """Test retry logic with mocked HTTP responses."""
 
     @patch('nav_client.requests.Session')
-    def test_successful_request_no_retry(self, mock_session_class, valid_credentials, sample_invoice_response):
+    def test_successful_request_no_retry(self, mock_session_class, valid_credentials, sample_invoice_digest_response):
         """Successful request should not retry."""
         mock_session = MagicMock()
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.content = sample_invoice_response
+        mock_response.content = sample_invoice_digest_response
         mock_session.post.return_value = mock_response
         mock_session_class.return_value = mock_session
 
         client = NavClient(valid_credentials, use_test_api=True)
         client.session = mock_session
 
-        result = client._execute_with_retry("/queryInvoiceData", b"<request/>")
+        result = client._execute_with_retry("/queryInvoiceDigest", b"<request/>")
 
         assert mock_session.post.call_count == 1
 
     @patch('nav_client.time.sleep')
     @patch('nav_client.requests.Session')
-    def test_retry_on_timeout(self, mock_session_class, mock_sleep, valid_credentials, sample_invoice_response):
+    def test_retry_on_timeout(self, mock_session_class, mock_sleep, valid_credentials, sample_invoice_digest_response):
         """Should retry on timeout errors."""
         import requests
 
         mock_session = MagicMock()
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.content = sample_invoice_response
+        mock_response.content = sample_invoice_digest_response
 
         # First call times out, second succeeds
         mock_session.post.side_effect = [
@@ -406,7 +404,7 @@ class TestRetryMechanism:
         client = NavClient(valid_credentials, use_test_api=True)
         client.session = mock_session
 
-        result = client._execute_with_retry("/queryInvoiceData", b"<request/>")
+        result = client._execute_with_retry("/queryInvoiceDigest", b"<request/>")
 
         assert mock_session.post.call_count == 2
         mock_sleep.assert_called_once()
@@ -433,9 +431,9 @@ class TestQueryInvoices:
     """Test invoice query methods with mocked HTTP."""
 
     @patch.object(NavClient, '_execute_with_retry')
-    def test_query_incoming_invoices(self, mock_execute, nav_client, sample_invoice_response):
+    def test_query_incoming_invoices(self, mock_execute, nav_client, sample_invoice_digest_response):
         """Test querying incoming invoices."""
-        mock_execute.return_value = sample_invoice_response
+        mock_execute.return_value = sample_invoice_digest_response
 
         invoices = nav_client.query_incoming_invoices(
             issue_date_from="2024-01-01",
@@ -444,17 +442,17 @@ class TestQueryInvoices:
 
         assert len(invoices) == 2
         assert invoices[0]["invoiceNumber"] == "INV-2024-001"
-        assert invoices[1]["grossAmount"] == 250000.50
+        assert invoices[1]["invoiceNetAmount"] == 200000.0
 
         # Verify endpoint called
         mock_execute.assert_called()
         call_args = mock_execute.call_args
-        assert "/queryInvoiceData" in call_args[0]
+        assert "/queryInvoiceDigest" in call_args[0]
 
     @patch.object(NavClient, '_execute_with_retry')
-    def test_query_outgoing_invoices(self, mock_execute, nav_client, sample_invoice_response):
+    def test_query_outgoing_invoices(self, mock_execute, nav_client, sample_invoice_digest_response):
         """Test querying outgoing invoices."""
-        mock_execute.return_value = sample_invoice_response
+        mock_execute.return_value = sample_invoice_digest_response
 
         invoices = nav_client.query_outgoing_invoices(
             issue_date_from="2024-01-01",
@@ -464,9 +462,9 @@ class TestQueryInvoices:
         assert len(invoices) == 2
 
     @patch.object(NavClient, '_execute_with_retry')
-    def test_test_connection_success(self, mock_execute, nav_client, sample_invoice_response):
+    def test_test_connection_success(self, mock_execute, nav_client, sample_invoice_digest_response):
         """Test connection check."""
-        mock_execute.return_value = sample_invoice_response
+        mock_execute.return_value = sample_invoice_digest_response
 
         result = nav_client.test_connection()
 

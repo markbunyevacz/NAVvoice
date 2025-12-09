@@ -60,27 +60,6 @@ class NavCredentials:
             raise ValueError("Tax number must be 8 digits")
 
 
-@dataclass
-class InvoiceData:
-    """Parsed invoice data from NAV response"""
-    invoice_number: str
-    supplier_name: str
-    supplier_tax_number: str
-    invoice_date: str
-    gross_amount: float
-    currency: str = "HUF"
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "invoiceNumber": self.invoice_number,
-            "supplierName": self.supplier_name,
-            "supplierTaxNumber": self.supplier_tax_number,
-            "invoiceDate": self.invoice_date,
-            "grossAmount": self.gross_amount,
-            "currency": self.currency,
-        }
-
-
 class NavApiError(Exception):
     """Custom exception for NAV API errors"""
     def __init__(self, code: str, message: str, technical_message: str = ""):
@@ -265,19 +244,15 @@ class NavClient:
 
     def _build_query_invoice_data_request(
         self,
+        invoice_number: str,
         invoice_direction: str,
-        issue_date_from: str,
-        issue_date_to: str,
-        page: int = 1
     ) -> bytes:
         """
         Build XML request for /queryInvoiceData endpoint.
 
         Args:
+            invoice_number: The invoice number to query
             invoice_direction: "INBOUND" for incoming, "OUTBOUND" for outgoing
-            issue_date_from: Start date (YYYY-MM-DD)
-            issue_date_to: End date (YYYY-MM-DD)
-            page: Page number (1-based)
 
         Returns:
             UTF-8 encoded XML request body
@@ -297,18 +272,10 @@ class NavClient:
         root.append(self._build_user_element(request_id, timestamp))
         root.append(self._build_software_element())
 
-        # Add invoice query params
+        # Add invoice number query
         invoice_query = etree.SubElement(root, "invoiceNumberQuery")
+        etree.SubElement(invoice_query, "invoiceNumber").text = invoice_number
         etree.SubElement(invoice_query, "invoiceDirection").text = invoice_direction
-
-        # Mandatory date range
-        mandatory_params = etree.SubElement(invoice_query, "mandatoryQueryParams")
-        issue_date = etree.SubElement(mandatory_params, "invoiceIssueDate")
-        etree.SubElement(issue_date, "dateFrom").text = issue_date_from
-        etree.SubElement(issue_date, "dateTo").text = issue_date_to
-
-        # Pagination
-        etree.SubElement(root, "page").text = str(page)
 
         # Serialize with XML declaration
         return etree.tostring(
@@ -318,7 +285,7 @@ class NavClient:
             pretty_print=True
         )
 
-    def _parse_invoice_response(self, response_xml: bytes) -> List[InvoiceData]:
+    def _parse_invoice_data_response(self, response_xml: bytes) -> Dict[str, Any]:
         """
         Parse XML response from queryInvoiceData endpoint.
 
@@ -326,35 +293,35 @@ class NavClient:
             response_xml: Raw XML response bytes
 
         Returns:
-            List of parsed InvoiceData objects
+            Dictionary with invoice data (including decoded base64 content)
         """
         root = etree.fromstring(response_xml)
-        invoices = []
+        
+        # Check for errors first
+        self._check_response_for_errors(response_xml)
 
-        # Find all invoice digest elements
-        for invoice_elem in root.findall(".//{%s}invoiceDigest" % NAMESPACES['api']):
+        result = {}
+        
+        # Extract invoice data (Base64)
+        invoice_data_elem = root.find(".//{%s}invoiceData" % NAMESPACES['api'])
+        if invoice_data_elem is not None and invoice_data_elem.text:
+            result['invoice_data_base64'] = invoice_data_elem.text
             try:
-                invoice_number = self._get_text(invoice_elem, "invoiceNumber", "")
-                supplier_name = self._get_text(invoice_elem, "supplierName", "Unknown")
-                supplier_tax = self._get_text(invoice_elem, "supplierTaxNumber", "")
-                invoice_date = self._get_text(invoice_elem, "invoiceIssueDate", "")
-                gross_amount_str = self._get_text(invoice_elem, "invoiceGrossAmount", "0")
-                currency = self._get_text(invoice_elem, "currencyCode", "HUF")
+                result['invoice_data_decoded'] = base64.b64decode(invoice_data_elem.text)
+                # Try to parse the decoded XML to get some metadata if needed
+                # decoded_xml = etree.fromstring(result['invoice_data_decoded'])
+                # result['supplier_name'] = ...
+            except Exception as e:
+                logger.warning(f"Failed to decode invoice data: {e}")
 
-                invoices.append(InvoiceData(
-                    invoice_number=invoice_number,
-                    supplier_name=supplier_name,
-                    supplier_tax_number=supplier_tax,
-                    invoice_date=invoice_date,
-                    gross_amount=float(gross_amount_str),
-                    currency=currency
-                ))
-            except (ValueError, AttributeError) as e:
-                # Log malformed invoice and continue
-                print(f"Warning: Could not parse invoice element: {e}")
-                continue
+        # Extract audit data
+        audit_data = root.find(".//{%s}auditData" % NAMESPACES['api'])
+        if audit_data is not None:
+             result['insDate'] = self._get_text(audit_data, "insDate")
+             result['originalRequestVersion'] = self._get_text(audit_data, "originalRequestVersion")
+             result['id'] = self._get_text(audit_data, "id") # Transaction ID
 
-        return invoices
+        return result
 
     @staticmethod
     def _get_text(element: etree.Element, tag: str, default: str = "") -> str:
@@ -384,10 +351,28 @@ class NavClient:
         # Check for funcCode != OK
         func_code = root.find(".//{%s}funcCode" % NAMESPACES['common'])
         if func_code is not None and func_code.text != "OK":
-            error_code = self._get_text(root, "errorCode", "UNKNOWN")
-            error_msg = self._get_text(root, "message", "Unknown error")
-            tech_msg = self._get_text(root, "technicalDetails", "")
+            # errorCode and message are siblings of funcCode (inside result element)
+            # We can search for them relative to root using .// or better, just search recursively
+            
+            error_code = self._get_text_recursive(root, "errorCode", "UNKNOWN")
+            error_msg = self._get_text_recursive(root, "message", "Unknown error")
+            tech_msg = self._get_text_recursive(root, "technicalDetails", "")
+            
             raise NavApiError(error_code, error_msg, tech_msg)
+
+    def _get_text_recursive(self, element: etree.Element, tag: str, default: str = "") -> str:
+        """Safely extract text from descendant element."""
+        # Try simple recursive search
+        child = element.find(".//" + tag)
+        if child is not None and child.text:
+            return child.text.strip()
+            
+        # Try with namespaces
+        for ns in NAMESPACES.values():
+            child = element.find(".//{%s}%s" % (ns, tag))
+            if child is not None and child.text:
+                return child.text.strip()
+        return default
 
     # =========================================================================
     # RETRY MECHANISM
@@ -475,6 +460,29 @@ class NavClient:
     # PUBLIC API METHODS
     # =========================================================================
 
+    def query_invoice_data(
+        self,
+        invoice_number: str,
+        invoice_direction: str = "INBOUND"
+    ) -> Dict[str, Any]:
+        """
+        Retrieve complete invoice data by invoice number.
+        
+        Args:
+            invoice_number: The invoice number to retrieve
+            invoice_direction: "INBOUND" or "OUTBOUND"
+            
+        Returns:
+            Dictionary containing 'invoice_data_decoded' (bytes) and other metadata
+        """
+        request_body = self._build_query_invoice_data_request(
+            invoice_number=invoice_number,
+            invoice_direction=invoice_direction
+        )
+        
+        response = self._execute_with_retry("/queryInvoiceData", request_body)
+        return self._parse_invoice_data_response(response)
+
     def query_incoming_invoices(
         self,
         issue_date_from: str,
@@ -485,8 +493,7 @@ class NavClient:
         """
         Query incoming (inbound) invoices from NAV for the specified date range.
 
-        This is the main method to fetch invoices received by your company
-        from suppliers, as recorded in NAV's Online Számla system.
+        This uses queryInvoiceDigest to get the list of invoices.
 
         Args:
             issue_date_from: Start date in YYYY-MM-DD format
@@ -495,60 +502,15 @@ class NavClient:
             fetch_all_pages: If True, automatically fetch all pages
 
         Returns:
-            List of invoice dictionaries with keys:
-            - invoiceNumber: str
-            - supplierName: str
-            - supplierTaxNumber: str
-            - invoiceDate: str (YYYY-MM-DD)
-            - grossAmount: float
-            - currency: str
-
-        Raises:
-            NavApiError: On API errors (after retry exhaustion)
-            ValueError: On invalid input parameters
-
-        Example:
-            >>> client = NavClient(credentials)
-            >>> invoices = client.query_incoming_invoices(
-            ...     issue_date_from="2024-01-01",
-            ...     issue_date_to="2024-01-31"
-            ... )
-            >>> print(f"Found {len(invoices)} invoices")
+            List of invoice digest dictionaries.
         """
-        # Validate date format
-        self._validate_date_format(issue_date_from)
-        self._validate_date_format(issue_date_to)
-
-        all_invoices: List[InvoiceData] = []
-        current_page = page
-
-        while True:
-            request_body = self._build_query_invoice_data_request(
-                invoice_direction="INBOUND",
-                issue_date_from=issue_date_from,
-                issue_date_to=issue_date_to,
-                page=current_page
-            )
-
-            response = self._execute_with_retry("/queryInvoiceData", request_body)
-            page_invoices = self._parse_invoice_response(response)
-
-            all_invoices.extend(page_invoices)
-
-            # Check if more pages available
-            if not fetch_all_pages or len(page_invoices) == 0:
-                break
-
-            # NAV returns max 100 invoices per page
-            if len(page_invoices) < 100:
-                break
-
-            current_page += 1
-
-            # Rate limiting: NAV allows max 1 request/second
-            time.sleep(1.1)
-
-        return [inv.to_dict() for inv in all_invoices]
+        return self.query_invoice_digest(
+            invoice_direction="INBOUND",
+            issue_date_from=issue_date_from,
+            issue_date_to=issue_date_to,
+            page=page,
+            fetch_all_pages=fetch_all_pages
+        )
 
     def query_outgoing_invoices(
         self,
@@ -562,31 +524,13 @@ class NavClient:
 
         Same as query_incoming_invoices but for invoices your company issued.
         """
-        self._validate_date_format(issue_date_from)
-        self._validate_date_format(issue_date_to)
-
-        all_invoices: List[InvoiceData] = []
-        current_page = page
-
-        while True:
-            request_body = self._build_query_invoice_data_request(
-                invoice_direction="OUTBOUND",
-                issue_date_from=issue_date_from,
-                issue_date_to=issue_date_to,
-                page=current_page
-            )
-
-            response = self._execute_with_retry("/queryInvoiceData", request_body)
-            page_invoices = self._parse_invoice_response(response)
-            all_invoices.extend(page_invoices)
-
-            if not fetch_all_pages or len(page_invoices) < 100:
-                break
-
-            current_page += 1
-            time.sleep(1.1)
-
-        return [inv.to_dict() for inv in all_invoices]
+        return self.query_invoice_digest(
+            invoice_direction="OUTBOUND",
+            issue_date_from=issue_date_from,
+            issue_date_to=issue_date_to,
+            page=page,
+            fetch_all_pages=fetch_all_pages
+        )
 
     @staticmethod
     def _validate_date_format(date_str: str) -> None:
@@ -629,21 +573,21 @@ class NavClient:
         issue_date_to: str,
         page: int = 1,
         supplier_tax_number: Optional[str] = None,
-        invoice_category: Optional[str] = None
+        invoice_category: Optional[str] = None,
+        relational_params: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> bytes:
         """
         Build XML request for /queryInvoiceDigest endpoint.
 
-        This endpoint returns summary information about invoices,
-        which is faster than queryInvoiceData but with less detail.
-
         Args:
-            invoice_direction: "INBOUND" for incoming, "OUTBOUND" for outgoing
+            invoice_direction: "INBOUND" or "OUTBOUND"
             issue_date_from: Start date (YYYY-MM-DD)
             issue_date_to: End date (YYYY-MM-DD)
             page: Page number (1-based)
-            supplier_tax_number: Optional filter by supplier tax number
-            invoice_category: Optional filter: "NORMAL", "SIMPLIFIED", "AGGREGATE"
+            supplier_tax_number: Optional filter
+            invoice_category: Optional filter
+            relational_params: Dict of relational queries, e.g.:
+                {'invoiceNetAmount': {'op': 'GT', 'value': 1000}}
 
         Returns:
             UTF-8 encoded XML request body
@@ -670,20 +614,31 @@ class NavClient:
         etree.SubElement(root, "invoiceDirection").text = invoice_direction
 
         # Add mandatory query params (date range)
-        mandatory_params = etree.SubElement(root, "mandatoryQueryParams")
+        # Note: In a full implementation, mandatory params could be one of multiple choices.
+        # Here we simplify to always use invoiceIssueDate as per typical usage.
+        invoice_query_params = etree.SubElement(root, "invoiceQueryParams")
+        mandatory_params = etree.SubElement(invoice_query_params, "mandatoryQueryParams")
         issue_date = etree.SubElement(mandatory_params, "invoiceIssueDate")
         etree.SubElement(issue_date, "dateFrom").text = issue_date_from
         etree.SubElement(issue_date, "dateTo").text = issue_date_to
 
-        # Add optional filters
+        # Add additional query params
         if supplier_tax_number or invoice_category:
-            additional_params = etree.SubElement(root, "additionalQueryParams")
+            additional_params = etree.SubElement(invoice_query_params, "additionalQueryParams")
 
             if supplier_tax_number:
                 etree.SubElement(additional_params, "supplierTaxNumber").text = supplier_tax_number
 
             if invoice_category:
                 etree.SubElement(additional_params, "invoiceCategory").text = invoice_category
+
+        # Add relational query params
+        if relational_params:
+            relational_elem = etree.SubElement(invoice_query_params, "relationalQueryParams")
+            for field, criteria in relational_params.items():
+                field_elem = etree.SubElement(relational_elem, field)
+                etree.SubElement(field_elem, "queryOperator").text = criteria.get('op', 'EQ')
+                etree.SubElement(field_elem, "queryValue").text = str(criteria.get('value', ''))
 
         return etree.tostring(
             root,
@@ -692,14 +647,21 @@ class NavClient:
             pretty_print=True
         )
 
-    def _parse_invoice_digest_response(self, response_xml: bytes) -> List[Dict[str, Any]]:
+    def _parse_invoice_digest_response(self, response_xml: bytes) -> tuple[List[Dict[str, Any]], int]:
         """
         Parse XML response from queryInvoiceDigest endpoint.
 
-        Returns digest (summary) format with additional metadata.
+        Returns:
+            Tuple of (list of digest dicts, total_available_pages)
         """
         root = etree.fromstring(response_xml)
         digests = []
+        
+        # Parse pagination info
+        try:
+            available_pages = int(self._get_text(root, "availablePage", "0"))
+        except ValueError:
+            available_pages = 0
 
         # Find all invoice digest elements
         for digest_elem in root.findall(".//{%s}invoiceDigest" % NAMESPACES['api']):
@@ -739,7 +701,7 @@ class NavClient:
                 logger.warning(f"Could not parse invoice digest element: {e}")
                 continue
 
-        return digests
+        return digests, available_pages
 
     def query_invoice_digest(
         self,
@@ -749,39 +711,14 @@ class NavClient:
         page: int = 1,
         fetch_all_pages: bool = True,
         supplier_tax_number: Optional[str] = None,
-        invoice_category: Optional[str] = None
+        invoice_category: Optional[str] = None,
+        relational_params: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> List[Dict[str, Any]]:
         """
         Query invoice digest (summary) from NAV.
 
-        This is faster than queryInvoiceData as it returns less detail,
-        but includes important metadata like transactionId for further queries.
-
         Args:
-            invoice_direction: "INBOUND" for incoming, "OUTBOUND" for outgoing
-            issue_date_from: Start date (YYYY-MM-DD)
-            issue_date_to: End date (YYYY-MM-DD)
-            page: Starting page (1-based)
-            fetch_all_pages: Auto-fetch all pages
-            supplier_tax_number: Filter by supplier
-            invoice_category: Filter: "NORMAL", "SIMPLIFIED", "AGGREGATE"
-
-        Returns:
-            List of invoice digest dictionaries with keys:
-            - invoiceNumber, supplierName, supplierTaxNumber
-            - invoiceIssueDate, invoiceDeliveryDate
-            - invoiceNetAmount, invoiceVatAmount, currency
-            - transactionId (for detailed queries)
-            - invoiceOperation (CREATE, MODIFY, STORNO)
-            - completenessIndicator, etc.
-
-        Example:
-            >>> digests = client.query_invoice_digest(
-            ...     invoice_direction="INBOUND",
-            ...     issue_date_from="2024-01-01",
-            ...     issue_date_to="2024-01-31",
-            ...     supplier_tax_number="12345678"
-            ... )
+            relational_params: Optional dict for advanced filtering (e.g. amount > X)
         """
         self._validate_date_format(issue_date_from)
         self._validate_date_format(issue_date_to)
@@ -799,25 +736,130 @@ class NavClient:
                 issue_date_to=issue_date_to,
                 page=current_page,
                 supplier_tax_number=supplier_tax_number,
-                invoice_category=invoice_category
+                invoice_category=invoice_category,
+                relational_params=relational_params
             )
 
             response = self._execute_with_retry("/queryInvoiceDigest", request_body)
-            page_digests = self._parse_invoice_digest_response(response)
+            page_digests, total_pages = self._parse_invoice_digest_response(response)
 
             all_digests.extend(page_digests)
 
             if not fetch_all_pages or len(page_digests) == 0:
                 break
 
-            # NAV returns max 100 items per page
-            if len(page_digests) < 100:
+            # If we know total pages, use that
+            if total_pages > 0:
+                if current_page >= total_pages:
+                    break
+            # Fallback to item count heuristic
+            elif len(page_digests) < 100:
                 break
 
             current_page += 1
-            time.sleep(1.1)  # Rate limit: 1 req/sec
+            time.sleep(1.1)
 
         return all_digests
+
+    # =========================================================================
+    # QUERY TRANSACTION STATUS ENDPOINT
+    # =========================================================================
+
+    def _build_query_transaction_status_request(
+        self,
+        transaction_id: str,
+        return_original_request: bool = False
+    ) -> bytes:
+        """
+        Build XML request for /queryTransactionStatus endpoint.
+
+        Args:
+            transaction_id: The transaction ID to query
+            return_original_request: Whether to include original request XML
+
+        Returns:
+            UTF-8 encoded XML request body
+        """
+        request_id = self._generate_request_id()
+        timestamp = self._get_utc_timestamp()
+
+        nsmap = {
+            None: NAMESPACES['api'],
+            'common': NAMESPACES['common'],
+        }
+        root = etree.Element("QueryTransactionStatusRequest", nsmap=nsmap)
+
+        root.append(self._build_basic_header(request_id, timestamp))
+        root.append(self._build_user_element(request_id, timestamp))
+        root.append(self._build_software_element())
+
+        etree.SubElement(root, "transactionId").text = transaction_id
+        etree.SubElement(root, "returnOriginalRequest").text = str(return_original_request).lower()
+
+        return etree.tostring(
+            root,
+            xml_declaration=True,
+            encoding="UTF-8",
+            pretty_print=True
+        )
+
+    def _parse_transaction_status_response(self, response_xml: bytes) -> Dict[str, Any]:
+        """
+        Parse XML response from queryTransactionStatus endpoint.
+        """
+        root = etree.fromstring(response_xml)
+        self._check_response_for_errors(response_xml)
+
+        result = {
+            "processingResults": []
+        }
+
+        processing_results = root.find(".//{%s}processingResultList" % NAMESPACES['api'])
+        if processing_results is not None:
+            for proc_result in processing_results.findall(".//{%s}processingResult" % NAMESPACES['api']):
+                item = {
+                    "index": int(self._get_text(proc_result, "index", "0")),
+                    "batchIndex": int(self._get_text(proc_result, "batchIndex", "0")),
+                    "invoiceStatus": self._get_text(proc_result, "invoiceStatus", "UNKNOWN"),
+                    "businessValidationMessages": []
+                }
+                
+                # Parse validation messages if any
+                msgs = proc_result.findall(".//{%s}businessValidationResult" % NAMESPACES['api'])
+                for msg in msgs:
+                     item["businessValidationMessages"].append({
+                         "validationResultCode": self._get_text(msg, "validationResultCode", ""),
+                         "validationErrorCode": self._get_text(msg, "validationErrorCode", ""),
+                         "message": self._get_text(msg, "message", ""),
+                         "pointer": self._get_text(msg, "pointer", "")
+                     })
+                
+                result["processingResults"].append(item)
+
+        return result
+
+    def query_transaction_status(
+        self,
+        transaction_id: str,
+        return_original_request: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Check status of a submitted transaction.
+
+        Args:
+            transaction_id: ID returned from manageInvoice
+            return_original_request: Return original XML if available
+
+        Returns:
+            Dictionary with processing results and validation messages
+        """
+        request_body = self._build_query_transaction_status_request(
+            transaction_id=transaction_id,
+            return_original_request=return_original_request
+        )
+
+        response = self._execute_with_retry("/queryTransactionStatus", request_body)
+        return self._parse_transaction_status_response(response)
 
     def query_incoming_invoice_digest(
         self,
@@ -914,11 +956,19 @@ if __name__ == "__main__":
 
         print(f"\n✓ Found {len(invoices)} incoming invoices:")
         for inv in invoices[:5]:  # Show first 5
+            gross = inv.get('invoiceNetAmount', 0) + inv.get('invoiceVatAmount', 0)
             print(f"  - {inv['invoiceNumber']}: {inv['supplierName']} "
-                  f"({inv['grossAmount']:,.0f} {inv.get('currency', 'HUF')})")
+                  f"({gross:,.0f} {inv.get('currency', 'HUF')})")
 
         if len(invoices) > 5:
             print(f"  ... and {len(invoices) - 5} more")
+            
+        # Example of fetching full data for the first invoice
+        if invoices:
+            first_inv_num = invoices[0]['invoiceNumber']
+            print(f"\nFetching full data for {first_inv_num}...")
+            full_data = client.query_invoice_data(first_inv_num)
+            print("✓ Full data retrieved (size: %d bytes)" % len(full_data.get('invoice_data_decoded', b'')))
 
     except NavApiError as e:
         print(f"✗ NAV API Error: {e}")
