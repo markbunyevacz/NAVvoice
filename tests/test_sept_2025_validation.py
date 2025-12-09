@@ -227,12 +227,7 @@ class TestNAVTestAPIIntegration:
     """
 
     @pytest.mark.integration
-    @pytest.mark.skipif(
-        not all([
-            pytest.config.getoption("--run-integration", default=False),
-        ]),
-        reason="Integration tests disabled. Use --run-integration to enable."
-    )
+    @pytest.mark.skip(reason="Requires NAV test credentials and --run-integration flag")
     def test_submit_invoice_with_vat_error_435(self, nav_client):
         """
         Submit invoice with intentional VAT rate mismatch to NAV test API.
