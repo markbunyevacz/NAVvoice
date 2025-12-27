@@ -273,8 +273,35 @@ def validate_vat_rate_for_tax_number(
         - Foreign companies: Usually 0% (reverse charge)
         - Special tax numbers (starting with 8): May have different rules
     """
-    # TODO: Implement validation logic
-    # This is a placeholder for future implementation
+    valid_domestic_rates = {0.0, 5.0, 18.0, 27.0}
+    valid_foreign_rates = {0.0}
+
+    if not tax_number or len(tax_number) != 8:
+        return False, f"Invalid tax number format: {tax_number} (must be 8 digits)"
+
+    is_special_tax_number = tax_number.startswith("8")
+
+    if is_special_tax_number:
+        if vat_rate not in valid_domestic_rates:
+            return False, (
+                f"Special tax number {tax_number} has invalid VAT rate {vat_rate}%. "
+                f"Valid rates: {sorted(valid_domestic_rates)}"
+            )
+        return True, ""
+
+    if is_domestic:
+        if vat_rate not in valid_domestic_rates:
+            return False, (
+                f"Domestic company VAT rate {vat_rate}% is invalid. "
+                f"Valid rates: {sorted(valid_domestic_rates)}"
+            )
+    else:
+        if vat_rate not in valid_foreign_rates:
+            return False, (
+                f"Foreign company should use reverse charge (0% VAT), "
+                f"but invoice shows {vat_rate}%. This triggers NAV error 435."
+            )
+
     return True, ""
 
 
@@ -294,8 +321,22 @@ def validate_vat_summary(
     Returns:
         Tuple of (is_valid, error_message)
     """
-    # TODO: Implement validation logic
-    return True, ""
+    if not line_items:
+        return True, ""
+
+    calculated_total = sum(item.get("vat_amount", 0.0) for item in line_items)
+    summary_total = vat_summary.get("total_vat", 0.0)
+    difference = abs(calculated_total - summary_total)
+
+    if difference <= tolerance:
+        return True, ""
+    else:
+        return False, (
+            f"VAT summary mismatch: sum of line items = {calculated_total:.2f} HUF, "
+            f"but summary shows {summary_total:.2f} HUF "
+            f"(difference: {difference:.2f} HUF, tolerance: {tolerance:.2f} HUF). "
+            f"This triggers NAV error 734."
+        )
 
 
 def validate_line_item_vat(

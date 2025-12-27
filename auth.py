@@ -22,6 +22,8 @@ import re
 import logging
 import secrets
 import hashlib
+import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
@@ -249,11 +251,11 @@ class PasswordManager:
 
 class JWTManager:
     """
-    JWT token generation and validation.
+    JWT token generation and validation with database-backed token revocation.
 
     Usage:
         config = AuthConfig(secret_key="your-secret-key")
-        jwt_mgr = JWTManager(config)
+        jwt_mgr = JWTManager(config, db_path="data/auth.db")
 
         # Generate tokens
         access_token, refresh_token = jwt_mgr.generate_tokens(user)
@@ -262,16 +264,60 @@ class JWTManager:
         payload = jwt_mgr.validate_token(access_token)
     """
 
-    # Token revocation list (in production, use Redis)
-    _revoked_tokens: set = set()
-
-    def __init__(self, config: AuthConfig):
-        """Initialize JWT manager."""
+    def __init__(self, config: AuthConfig, db_path: str = "data/auth.db"):
+        """Initialize JWT manager with database-backed token revocation."""
         if jwt is None:
             raise ImportError("PyJWT not installed")
 
         self.config = config
-        logger.info("JWTManager initialized")
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else ".", exist_ok=True)
+        self._initialize_db()
+        logger.info(f"JWTManager initialized with database at {db_path}")
+
+    @contextmanager
+    def _get_connection(self):
+        """Context manager for database connections."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _initialize_db(self) -> None:
+        """Create revoked tokens table if not exists."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS revoked_tokens (
+                    jti TEXT PRIMARY KEY,
+                    revoked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at)")
+
+    def _is_token_revoked(self, jti: str) -> bool:
+        """Check if token is revoked."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM revoked_tokens WHERE jti = ?",
+                (jti,)
+            ).fetchone()
+            return row is not None
+
+    def _cleanup_expired_tokens(self) -> int:
+        """Remove expired tokens from revocation list."""
+        with self._get_connection() as conn:
+            result = conn.execute(
+                "DELETE FROM revoked_tokens WHERE expires_at < ?",
+                (datetime.now(timezone.utc).isoformat(),)
+            )
+            return result.rowcount
 
     def generate_tokens(self, user: User) -> Tuple[str, str]:
         """
@@ -358,8 +404,8 @@ class JWTManager:
                 logger.warning(f"Token type mismatch: expected {token_type}")
                 return None
 
-            # Check if revoked
-            if payload.get("jti") in self._revoked_tokens:
+            # Check if revoked (database lookup)
+            if self._is_token_revoked(payload.get("jti", "")):
                 logger.warning(f"Token has been revoked: {payload.get('jti')}")
                 return None
 
@@ -374,7 +420,7 @@ class JWTManager:
 
     def revoke_token(self, token: str) -> bool:
         """
-        Revoke a token (logout).
+        Revoke a token (logout) by storing in database.
 
         Args:
             token: JWT token to revoke
@@ -383,7 +429,7 @@ class JWTManager:
             True if revoked successfully
         """
         try:
-            # Decode without verification to get JTI
+            # Decode without verification to get JTI and expiration
             payload = jwt.decode(
                 token,
                 self.config.secret_key,
@@ -392,8 +438,14 @@ class JWTManager:
             )
 
             jti = payload.get("jti")
+            exp = payload.get("exp")
             if jti:
-                self._revoked_tokens.add(jti)
+                with self._get_connection() as conn:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO revoked_tokens (jti, expires_at)
+                           VALUES (?, ?)""",
+                        (jti, datetime.fromtimestamp(exp, tz=timezone.utc).isoformat() if exp else None)
+                    )
                 logger.info(f"Token revoked: {jti}")
                 return True
 
@@ -436,29 +488,115 @@ class JWTManager:
 # AUTHENTICATION DECORATOR
 # =============================================================================
 
+_auth_service_instance: Optional["AuthService"] = None
+
+
+def set_auth_service(auth_service: "AuthService") -> None:
+    """
+    Set the global AuthService instance for the require_auth decorator.
+
+    Call this during application startup:
+        auth_service = AuthService()
+        set_auth_service(auth_service)
+    """
+    global _auth_service_instance
+    _auth_service_instance = auth_service
+
+
+def get_auth_service() -> Optional["AuthService"]:
+    """Get the global AuthService instance."""
+    return _auth_service_instance
+
+
 def require_auth(permissions: Optional[List[Permission]] = None):
     """
     Decorator to require authentication and optional permissions.
 
+    Works with Flask and FastAPI by extracting the Authorization header
+    from the request context. Requires set_auth_service() to be called
+    during application startup.
+
     Usage:
+        # During app startup
+        auth_service = AuthService()
+        set_auth_service(auth_service)
+
+        # Flask
+        @app.route('/protected')
         @require_auth()
         def protected_endpoint(current_user):
-            ...
+            return f"Hello {current_user.email}"
 
+        @app.route('/admin')
         @require_auth([Permission.MANAGE_USERS])
         def admin_only_endpoint(current_user):
-            ...
+            return "Admin area"
+
+        # FastAPI
+        @app.get('/protected')
+        @require_auth()
+        async def protected_endpoint(request: Request, current_user: User = None):
+            return {"user": current_user.email}
     """
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            # This would be integrated with your web framework
-            # For Flask: use request.headers.get('Authorization')
-            # For FastAPI: use Depends(get_current_user)
-            raise NotImplementedError(
-                "Integrate with your web framework. "
-                "See AuthMiddleware for implementation."
+            auth_service = get_auth_service()
+            if not auth_service:
+                raise RuntimeError(
+                    "AuthService not configured. Call set_auth_service() during app startup."
+                )
+
+            # Try to get Authorization header from various framework contexts
+            authorization = None
+
+            # Try Flask context
+            try:
+                from flask import request as flask_request
+                authorization = flask_request.headers.get("Authorization")
+            except (ImportError, RuntimeError):
+                pass
+
+            # Try FastAPI/Starlette context
+            if not authorization:
+                try:
+                    # Check if first arg is a Request object (FastAPI)
+                    if args and hasattr(args[0], "headers"):
+                        authorization = args[0].headers.get("Authorization")
+                    # Check kwargs for request
+                    elif "request" in kwargs and hasattr(kwargs["request"], "headers"):
+                        authorization = kwargs["request"].headers.get("Authorization")
+                except Exception:
+                    pass
+
+            # Validate authentication
+            is_valid, user, error = auth_service.validate_request(
+                authorization,
+                permissions
             )
+
+            if not is_valid:
+                # Return appropriate error response based on framework
+                try:
+                    from flask import jsonify
+                    return jsonify({"error": error or "Unauthorized"}), 401
+                except ImportError:
+                    pass
+
+                # For FastAPI, raise HTTPException
+                try:
+                    from fastapi import HTTPException
+                    raise HTTPException(status_code=401, detail=error or "Unauthorized")
+                except ImportError:
+                    pass
+
+                # Generic fallback
+                raise PermissionError(error or "Unauthorized")
+
+            # Inject current_user into kwargs
+            kwargs["current_user"] = user
+            return func(*args, **kwargs)
+
         return wrapper
     return decorator
 
@@ -541,20 +679,74 @@ class AuthMiddleware:
 
 
 # =============================================================================
-# USER STORE (In-Memory for Demo, use Database in Production)
+# USER STORE (Database-backed implementation)
 # =============================================================================
 
 class UserStore:
     """
-    User storage and management.
+    User storage and management using SQLite database.
 
-    In production, replace with database-backed implementation.
+    Provides persistent storage for user accounts with support for
+    multi-tenant isolation and secure password management.
+
+    Usage:
+        store = UserStore("data/users.db")
+        user = store.create_user("user@example.com", "Password123!", UserRole.ACCOUNTANT, "tenant-1")
     """
 
-    def __init__(self):
-        """Initialize user store."""
-        self._users: Dict[str, User] = {}  # user_id -> User
-        self._email_index: Dict[str, str] = {}  # email -> user_id
+    def __init__(self, db_path: str = "data/users.db"):
+        """Initialize user store with database path."""
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else ".", exist_ok=True)
+        self._initialize_db()
+        logger.info(f"UserStore initialized with database at {db_path}")
+
+    @contextmanager
+    def _get_connection(self):
+        """Context manager for database connections."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _initialize_db(self) -> None:
+        """Create users table if not exists."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    email TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    name TEXT DEFAULT '',
+                    is_active INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_login TIMESTAMP
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id)")
+
+    def _row_to_user(self, row: sqlite3.Row) -> User:
+        """Convert database row to User object."""
+        return User(
+            id=row["id"],
+            email=row["email"],
+            password_hash=row["password_hash"],
+            role=UserRole(row["role"]),
+            tenant_id=row["tenant_id"],
+            name=row["name"] or "",
+            is_active=bool(row["is_active"]),
+            created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(),
+            last_login=datetime.fromisoformat(row["last_login"]) if row["last_login"] else None
+        )
 
     def create_user(
         self,
@@ -578,10 +770,10 @@ class UserStore:
             Created User object
 
         Raises:
-            ValueError: If email already exists
+            ValueError: If email already exists or password is weak
         """
         # Check email uniqueness
-        if email.lower() in self._email_index:
+        if self.get_user_by_email(email):
             raise ValueError(f"Email already exists: {email}")
 
         # Validate password
@@ -592,6 +784,7 @@ class UserStore:
         # Create user
         user_id = secrets.token_urlsafe(16)
         password_hash = PasswordManager.hash_password(password)
+        created_at = datetime.now()
 
         user = User(
             id=user_id,
@@ -599,26 +792,36 @@ class UserStore:
             password_hash=password_hash,
             role=role,
             tenant_id=tenant_id,
-            name=name
+            name=name,
+            created_at=created_at
         )
 
-        self._users[user_id] = user
-        self._email_index[email.lower()] = user_id
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO users (id, email, password_hash, role, tenant_id, name, is_active, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, email.lower(), password_hash, role.value, tenant_id, name, 1, created_at.isoformat()))
 
         logger.info(f"Created user: {email} with role {role.value}")
         return user
 
     def get_user_by_email(self, email: str) -> Optional[User]:
         """Get user by email."""
-        user_id = self._email_index.get(email.lower())
-        return self._users.get(user_id) if user_id else None
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE email = ?",
+                (email.lower(),)
+            ).fetchone()
+            return self._row_to_user(row) if row else None
 
     def get_user_by_id(self, user_id: str, tenant_id: str) -> Optional[User]:
         """Get user by ID with tenant verification."""
-        user = self._users.get(user_id)
-        if user and user.tenant_id == tenant_id:
-            return user
-        return None
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE id = ? AND tenant_id = ?",
+                (user_id, tenant_id)
+            ).fetchone()
+            return self._row_to_user(row) if row else None
 
     def authenticate(self, email: str, password: str) -> Optional[User]:
         """
@@ -646,6 +849,11 @@ class UserStore:
             return None
 
         # Update last login
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE users SET last_login = ? WHERE id = ?",
+                (datetime.now().isoformat(), user.id)
+            )
         user.last_login = datetime.now()
         logger.info(f"User authenticated: {email}")
 
@@ -653,25 +861,67 @@ class UserStore:
 
     def get_users_by_tenant(self, tenant_id: str) -> List[User]:
         """Get all users for a tenant."""
-        return [u for u in self._users.values() if u.tenant_id == tenant_id]
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM users WHERE tenant_id = ? ORDER BY email",
+                (tenant_id,)
+            ).fetchall()
+            return [self._row_to_user(row) for row in rows]
 
     def update_user_role(self, user_id: str, new_role: UserRole) -> bool:
         """Update user's role."""
-        user = self._users.get(user_id)
-        if user:
-            user.role = new_role
-            logger.info(f"Updated user {user.email} role to {new_role.value}")
-            return True
+        with self._get_connection() as conn:
+            result = conn.execute(
+                "UPDATE users SET role = ? WHERE id = ?",
+                (new_role.value, user_id)
+            )
+            if result.rowcount > 0:
+                user = self._get_user_by_id_internal(user_id)
+                if user:
+                    logger.info(f"Updated user {user.email} role to {new_role.value}")
+                return True
         return False
+
+    def _get_user_by_id_internal(self, user_id: str) -> Optional[User]:
+        """Get user by ID without tenant verification (internal use only)."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE id = ?",
+                (user_id,)
+            ).fetchone()
+            return self._row_to_user(row) if row else None
 
     def deactivate_user(self, user_id: str) -> bool:
         """Deactivate a user account."""
-        user = self._users.get(user_id)
-        if user:
-            user.is_active = False
-            logger.info(f"Deactivated user: {user.email}")
-            return True
+        with self._get_connection() as conn:
+            result = conn.execute(
+                "UPDATE users SET is_active = 0 WHERE id = ?",
+                (user_id,)
+            )
+            if result.rowcount > 0:
+                user = self._get_user_by_id_internal(user_id)
+                if user:
+                    logger.info(f"Deactivated user: {user.email}")
+                return True
         return False
+
+    def delete_user(self, user_id: str) -> bool:
+        """Permanently delete a user account."""
+        with self._get_connection() as conn:
+            result = conn.execute(
+                "DELETE FROM users WHERE id = ?",
+                (user_id,)
+            )
+            return result.rowcount > 0
+
+    def list_users(self, limit: int = 100) -> List[User]:
+        """List all users."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM users ORDER BY email LIMIT ?",
+                (limit,)
+            ).fetchall()
+            return [self._row_to_user(row) for row in rows]
 
 
 # =============================================================================
@@ -683,9 +933,10 @@ class AuthService:
     High-level authentication service.
 
     Combines JWT management and user store for complete auth flows.
+    Uses SQLite databases for persistent storage of users and revoked tokens.
 
     Usage:
-        auth_service = AuthService()
+        auth_service = AuthService(db_path="data/auth.db")
 
         # Register new user
         user = auth_service.register("user@example.com", "Password123!",
@@ -702,14 +953,24 @@ class AuthService:
         )
     """
 
-    def __init__(self, config: Optional[AuthConfig] = None):
-        """Initialize auth service."""
+    def __init__(
+        self,
+        config: Optional[AuthConfig] = None,
+        db_path: str = "data/auth.db"
+    ):
+        """
+        Initialize auth service with database-backed storage.
+
+        Args:
+            config: Authentication configuration
+            db_path: Path to SQLite database for users and tokens
+        """
         self.config = config or AuthConfig()
-        self.jwt_manager = JWTManager(self.config)
-        self.user_store = UserStore()
+        self.jwt_manager = JWTManager(self.config, db_path=db_path)
+        self.user_store = UserStore(db_path=db_path)
         self.middleware = AuthMiddleware(self.jwt_manager, self.user_store)
 
-        logger.info("AuthService initialized")
+        logger.info(f"AuthService initialized with database at {db_path}")
 
     def register(
         self,

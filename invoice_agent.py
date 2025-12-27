@@ -504,60 +504,114 @@ Tisztelt Partnerünk!
 
 
 # =============================================================================
-# VENDOR EMAIL LOOKUP (Mock for now)
+# VENDOR EMAIL LOOKUP (Database-backed implementation)
 # =============================================================================
+
+import sqlite3
+from contextlib import contextmanager
+
 
 class VendorDirectory:
     """
-    Vendor contact information lookup.
+    Vendor contact information lookup using SQLite database.
 
-    In production, this would connect to a CRM or contact database.
-    For now, uses a mock in-memory database.
+    Provides persistent storage for vendor contact information with
+    support for lookup by tax number or name (fuzzy matching).
+
+    Usage:
+        directory = VendorDirectory("data/vendors.db")
+        directory.initialize()
+
+        # Add vendor
+        directory.add_vendor("12345678", "Supplier Kft", "contact@supplier.hu")
+
+        # Lookup
+        email = directory.get_email("Supplier", tax_number="12345678")
     """
 
-    # Mock vendor database (tax_number -> contact info)
-    MOCK_VENDORS = {
-        "12345678": {
-            "name": "Test Supplier Kft.",
-            "email": "szamla@testsupplier.hu",
-            "contact_person": "Kovács János",
-            "phone": "+36 1 234 5678"
-        },
-        "87654321": {
-            "name": "Another Vendor Zrt.",
-            "email": "invoice@anothervendor.hu",
-            "contact_person": "Nagy Éva",
-            "phone": "+36 30 987 6543"
-        },
-        "11111111": {
-            "name": "Demo Partner Bt.",
-            "email": "penzugy@demopartner.hu",
-            "contact_person": "Szabó Péter",
-            "phone": "+36 20 111 2222"
-        },
-    }
-
-    def __init__(self, custom_vendors: Optional[Dict] = None):
+    def __init__(self, db_path: str = "data/vendors.db"):
         """
-        Initialize directory with optional custom vendors.
+        Initialize vendor directory with database path.
 
         Args:
-            custom_vendors: Additional vendors to merge with mock data
+            db_path: Path to SQLite database file
         """
-        self.vendors = {**self.MOCK_VENDORS}
-        if custom_vendors:
-            self.vendors.update(custom_vendors)
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else ".", exist_ok=True)
+        self._initialized = False
+
+    @contextmanager
+    def _get_connection(self):
+        """Context manager for database connections."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def initialize(self) -> None:
+        """Create database schema if not exists."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS vendors (
+                    tax_number TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    contact_person TEXT DEFAULT '',
+                    phone TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_vendors_name ON vendors(name)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_vendors_email ON vendors(email)")
+        self._initialized = True
+        logger.info(f"VendorDirectory initialized at {self.db_path}")
+
+    def _ensure_initialized(self) -> None:
+        """Ensure database is initialized before operations."""
+        if not self._initialized:
+            self.initialize()
 
     def lookup_by_tax_number(self, tax_number: str) -> Optional[Dict[str, str]]:
         """Get vendor contact by tax number."""
-        return self.vendors.get(tax_number)
+        self._ensure_initialized()
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM vendors WHERE tax_number = ?",
+                (tax_number,)
+            ).fetchone()
+            if row:
+                return {
+                    "name": row["name"],
+                    "email": row["email"],
+                    "contact_person": row["contact_person"],
+                    "phone": row["phone"],
+                    "tax_number": row["tax_number"]
+                }
+        return None
 
     def lookup_by_name(self, vendor_name: str) -> Optional[Dict[str, str]]:
-        """Get vendor contact by name (fuzzy match)."""
-        vendor_lower = vendor_name.lower()
-        for tax_num, info in self.vendors.items():
-            if info["name"].lower() in vendor_lower or vendor_lower in info["name"].lower():
-                return {**info, "tax_number": tax_num}
+        """Get vendor contact by name (fuzzy match using LIKE)."""
+        self._ensure_initialized()
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM vendors WHERE LOWER(name) LIKE ? OR ? LIKE '%' || LOWER(name) || '%'",
+                (f"%{vendor_name.lower()}%", vendor_name.lower())
+            ).fetchone()
+            if row:
+                return {
+                    "name": row["name"],
+                    "email": row["email"],
+                    "contact_person": row["contact_person"],
+                    "phone": row["phone"],
+                    "tax_number": row["tax_number"]
+                }
         return None
 
     def get_email(self, vendor_name: str, tax_number: Optional[str] = None) -> Optional[str]:
@@ -588,12 +642,69 @@ class VendorDirectory:
         phone: str = ""
     ) -> None:
         """Add or update vendor in directory."""
-        self.vendors[tax_number] = {
-            "name": name,
-            "email": email,
-            "contact_person": contact_person,
-            "phone": phone
-        }
+        self._ensure_initialized()
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO vendors (tax_number, name, email, contact_person, phone, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(tax_number) DO UPDATE SET
+                    name = excluded.name,
+                    email = excluded.email,
+                    contact_person = excluded.contact_person,
+                    phone = excluded.phone,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (tax_number, name, email, contact_person, phone))
+        logger.info(f"Added/updated vendor: {name} ({tax_number})")
+
+    def delete_vendor(self, tax_number: str) -> bool:
+        """Delete vendor from directory."""
+        self._ensure_initialized()
+        with self._get_connection() as conn:
+            result = conn.execute(
+                "DELETE FROM vendors WHERE tax_number = ?",
+                (tax_number,)
+            )
+            return result.rowcount > 0
+
+    def list_vendors(self, limit: int = 100) -> List[Dict[str, str]]:
+        """List all vendors in directory."""
+        self._ensure_initialized()
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM vendors ORDER BY name LIMIT ?",
+                (limit,)
+            ).fetchall()
+            return [
+                {
+                    "name": row["name"],
+                    "email": row["email"],
+                    "contact_person": row["contact_person"],
+                    "phone": row["phone"],
+                    "tax_number": row["tax_number"]
+                }
+                for row in rows
+            ]
+
+    def search_vendors(self, query: str, limit: int = 50) -> List[Dict[str, str]]:
+        """Search vendors by name or tax number."""
+        self._ensure_initialized()
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """SELECT * FROM vendors 
+                   WHERE LOWER(name) LIKE ? OR tax_number LIKE ?
+                   ORDER BY name LIMIT ?""",
+                (f"%{query.lower()}%", f"%{query}%", limit)
+            ).fetchall()
+            return [
+                {
+                    "name": row["name"],
+                    "email": row["email"],
+                    "contact_person": row["contact_person"],
+                    "phone": row["phone"],
+                    "tax_number": row["tax_number"]
+                }
+                for row in rows
+            ]
 
 
 # =============================================================================
@@ -634,15 +745,17 @@ class Mailer:
         )
     """
 
-    def __init__(self, config: MailerConfig):
+    def __init__(self, config: MailerConfig, vendor_db_path: str = "data/vendors.db"):
         """
         Initialize mailer.
 
         Args:
             config: SMTP configuration
+            vendor_db_path: Path to vendor database
         """
         self.config = config
-        self.vendor_directory = VendorDirectory()
+        self.vendor_directory = VendorDirectory(vendor_db_path)
+        self.vendor_directory.initialize()
         self._sent_count = 0
         self._failed_count = 0
 
@@ -820,6 +933,7 @@ class InvoiceReminderOrchestrator:
 
     Usage:
         orchestrator = InvoiceReminderOrchestrator(
+            tenant_id="tenant-001",
             db_path="data/invoices.db",
             gemini_api_key="your-api-key",
             gmail_config=mailer_config
@@ -829,13 +943,27 @@ class InvoiceReminderOrchestrator:
 
     def __init__(
         self,
+        tenant_id: str,
         db_path: str,
         gemini_api_key: str,
         gmail_config: MailerConfig,
-        company_name: str = "Cégünk"
+        company_name: str = "Cégünk",
+        vendor_db_path: str = "data/vendors.db"
     ):
+        """
+        Initialize the orchestrator.
+
+        Args:
+            tenant_id: Tenant identifier for multi-tenancy
+            db_path: Path to invoice database
+            gemini_api_key: Google Gemini API key
+            gmail_config: Gmail SMTP configuration
+            company_name: Company name for email signatures
+            vendor_db_path: Path to vendor database
+        """
         from database_manager import DatabaseManager
 
+        self.tenant_id = tenant_id
         self.db = DatabaseManager(db_path)
         self.db.initialize()
 
@@ -844,7 +972,7 @@ class InvoiceReminderOrchestrator:
             company_name=company_name
         ))
 
-        self.mailer = Mailer(gmail_config)
+        self.mailer = Mailer(gmail_config, vendor_db_path=vendor_db_path)
 
     def process_missing_invoices(
         self,
@@ -861,16 +989,17 @@ class InvoiceReminderOrchestrator:
         Returns:
             Processing results summary
         """
-        # Get missing invoices
-        missing = self.db.get_missing_invoices(days_old=days_old)
+        # Get missing invoices for this tenant
+        missing = self.db.get_missing_invoices(tenant_id=self.tenant_id, days_old=days_old)
 
         if not missing:
-            return {"processed": 0, "message": "No missing invoices found"}
+            return {"processed": 0, "message": "No missing invoices found", "tenant_id": self.tenant_id}
 
         # Limit batch size
         to_process = missing[:max_emails]
 
         results = {
+            "tenant_id": self.tenant_id,
             "processed": 0,
             "sent": 0,
             "failed": 0,
@@ -902,8 +1031,11 @@ class InvoiceReminderOrchestrator:
             send_result = self.mailer.send_invoice_reminder(invoice, email_content)
 
             if send_result["success"]:
-                # Update database
-                self.db.mark_as_emailed(invoice["nav_invoice_number"])
+                # Update database with tenant_id
+                self.db.mark_as_emailed(
+                    tenant_id=self.tenant_id,
+                    invoice_number=invoice["nav_invoice_number"]
+                )
                 results["sent"] += 1
             else:
                 results["failed"] += 1
