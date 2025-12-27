@@ -372,6 +372,7 @@ class PDFScanner:
     def scan_folder(
         self,
         folder_path: str,
+        tenant_id: str,
         recursive: bool = True,
         dry_run: bool = False,
         content_fallback: bool = True
@@ -385,13 +386,19 @@ class PDFScanner:
 
         Args:
             folder_path: Path to folder containing PDFs
+            tenant_id: Tenant identifier for multi-tenancy (required)
             recursive: Scan subdirectories
             dry_run: If True, don't update database
             content_fallback: Scan content if filename doesn't match
 
         Returns:
             ScanResult with match statistics
+
+        Raises:
+            ValueError: If tenant_id is not provided
         """
+        if not tenant_id:
+            raise ValueError("tenant_id is required for multi-tenant isolation")
         folder = Path(folder_path)
         if not folder.exists():
             raise FileNotFoundError(f"Folder not found: {folder_path}")
@@ -436,7 +443,8 @@ class PDFScanner:
                 if matched_in_db:
                     if not dry_run:
                         self.db.mark_as_received(
-                            scanned.invoice_number,
+                            tenant_id=tenant_id,
+                            invoice_number=scanned.invoice_number,
                             pdf_path=str(pdf_path)
                         )
                     matched_invoices.append(scanned.invoice_number)
@@ -601,9 +609,18 @@ class PDFWatcher:
     Requires: pip install watchdog
     """
 
-    def __init__(self, scanner: PDFScanner, folder: str):
+    def __init__(self, scanner: PDFScanner, folder: str, tenant_id: str):
+        """
+        Initialize PDF watcher.
+
+        Args:
+            scanner: PDFScanner instance
+            folder: Folder to watch
+            tenant_id: Tenant identifier for multi-tenancy
+        """
         self.scanner = scanner
         self.folder = folder
+        self.tenant_id = tenant_id
         self._running = False
 
     def start(self):
@@ -615,20 +632,24 @@ class PDFWatcher:
             logger.error("watchdog not installed. Run: pip install watchdog")
             return
 
+        watcher_tenant_id = self.tenant_id
+
         class PDFHandler(FileSystemEventHandler):
-            def __init__(self, scanner):
+            def __init__(self, scanner, tenant_id):
                 self.scanner = scanner
+                self.tenant_id = tenant_id
 
             def on_created(self, event):
                 if event.src_path.lower().endswith('.pdf'):
                     logger.info(f"New PDF detected: {event.src_path}")
                     self.scanner.scan_folder(
                         str(Path(event.src_path).parent),
+                        tenant_id=self.tenant_id,
                         recursive=False
                     )
 
         observer = Observer()
-        observer.schedule(PDFHandler(self.scanner), self.folder, recursive=True)
+        observer.schedule(PDFHandler(self.scanner, watcher_tenant_id), self.folder, recursive=True)
         observer.start()
 
         logger.info(f"Watching {self.folder} for new PDFs...")
@@ -662,6 +683,11 @@ def main():
         nargs="?",
         default="data/pdfs",
         help="Folder to scan (default: data/pdfs)"
+    )
+    parser.add_argument(
+        "-t", "--tenant-id",
+        required=True,
+        help="Tenant identifier for multi-tenancy (required)"
     )
     parser.add_argument(
         "-d", "--database",
@@ -707,13 +733,14 @@ def main():
 
     if args.watch:
         # Watch mode
-        watcher = PDFWatcher(scanner, args.folder)
+        watcher = PDFWatcher(scanner, args.folder, args.tenant_id)
         watcher.start()
     else:
         # One-time scan
         try:
             result = scanner.scan_folder(
                 args.folder,
+                tenant_id=args.tenant_id,
                 recursive=args.recursive,
                 dry_run=args.dry_run
             )
