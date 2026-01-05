@@ -70,14 +70,15 @@ class NavCredentials:
     login: str                    # Technical user login name
     password: str                 # Technical user password (will be hashed)
     signature_key: str            # XML signing key (32 chars)
-    replacement_key: str          # Key replacement (32 chars)
+    replacement_key: str          # Key replacement (16 or 32 chars)
     tax_number: str              # Company tax number (8 digits)
 
     def __post_init__(self):
         if len(self.signature_key) != 32:
             raise ValueError("Signature key must be exactly 32 characters")
-        if len(self.replacement_key) != 32:
-            raise ValueError("Replacement key must be exactly 32 characters")
+        # Replacement key can be 16 chars (raw AES-128 key) or 32 chars (hex-encoded)
+        if len(self.replacement_key) not in (16, 32):
+            raise ValueError("Replacement key must be 16 or 32 characters")
         if not self.tax_number.isdigit() or len(self.tax_number) != 8:
             raise ValueError("Tax number must be 8 digits")
 
@@ -130,7 +131,7 @@ class NavClient:
         )
     """
 
-    SOFTWARE_ID = "HU12345678-1234"  # Replace with registered software ID
+    SOFTWARE_ID = "HU14604762-NAVVC01"  # 18-char software ID matching [0-9A-Z\-]{18}
     SOFTWARE_NAME = "NAV Invoice Reconciliation"
     SOFTWARE_VERSION = "1.0.0"
     SOFTWARE_DEV_NAME = "Your Company Name"
