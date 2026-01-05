@@ -59,6 +59,180 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# PDF MALWARE SCANNER
+# =============================================================================
+
+class PDFMalwareScanner:
+    """
+    Scans PDF files for potential malware indicators before processing.
+
+    Security checks performed:
+    1. JavaScript detection - PDFs can contain malicious JS
+    2. Embedded file detection - PDFs can contain hidden executables
+    3. Launch action detection - PDFs can auto-launch programs
+    4. URI action detection - PDFs can redirect to malicious URLs
+    5. File size anomaly detection - Unusually large PDFs may contain hidden content
+    6. Suspicious object streams - Obfuscated content detection
+
+    This is a heuristic-based scanner and should be used alongside
+    enterprise antivirus solutions for production deployments.
+    """
+
+    # Maximum file size in bytes (50MB - larger files are suspicious for invoices)
+    MAX_FILE_SIZE = 50 * 1024 * 1024
+
+    # Suspicious patterns in PDF content
+    SUSPICIOUS_PATTERNS = [
+        # JavaScript indicators
+        (rb'/JavaScript', 'JavaScript code detected'),
+        (rb'/JS', 'JavaScript reference detected'),
+        (rb'/AA', 'Auto-action detected'),
+
+        # Embedded files
+        (rb'/EmbeddedFile', 'Embedded file detected'),
+        (rb'/EmbeddedFiles', 'Embedded files collection detected'),
+
+        # Launch actions (can execute programs)
+        (rb'/Launch', 'Launch action detected - can execute programs'),
+        (rb'/OpenAction', 'Open action detected'),
+
+        # URI actions (can redirect to malicious sites)
+        (rb'/URI', 'URI action detected'),
+        (rb'/GoToR', 'Remote GoTo action detected'),
+        (rb'/GoToE', 'Embedded GoTo action detected'),
+
+        # Form submission (can exfiltrate data)
+        (rb'/SubmitForm', 'Form submission action detected'),
+
+        # Obfuscation indicators
+        (rb'/ObjStm', 'Object stream detected - may contain obfuscated content'),
+        (rb'/XFA', 'XFA form detected - complex forms can contain exploits'),
+
+        # Encryption that might hide content
+        (rb'/Encrypt', 'Encryption detected'),
+
+        # AcroForm with JavaScript
+        (rb'/AcroForm', 'AcroForm detected - may contain scripts'),
+    ]
+
+    # High-risk patterns that should block processing
+    HIGH_RISK_PATTERNS = [
+        (rb'/Launch', 'Launch action - HIGH RISK'),
+        (rb'/JavaScript', 'JavaScript - HIGH RISK'),
+        (rb'/JS\s', 'JavaScript reference - HIGH RISK'),
+    ]
+
+    def __init__(self, strict_mode: bool = False, max_file_size: int = None):
+        """
+        Initialize the malware scanner.
+
+        Args:
+            strict_mode: If True, block on any suspicious pattern.
+                        If False, only block on high-risk patterns.
+            max_file_size: Override default max file size (bytes)
+        """
+        self.strict_mode = strict_mode
+        self.max_file_size = max_file_size or self.MAX_FILE_SIZE
+
+    def scan_file(self, pdf_path: Path) -> tuple[bool, List[str]]:
+        """
+        Scan a PDF file for malware indicators.
+
+        Args:
+            pdf_path: Path to the PDF file
+
+        Returns:
+            Tuple of (is_safe, list_of_warnings)
+            is_safe is False if high-risk patterns detected or strict_mode with any warning
+        """
+        warnings = []
+        is_safe = True
+
+        try:
+            # Check file exists
+            if not pdf_path.exists():
+                return False, ["File does not exist"]
+
+            # Check file size
+            file_size = pdf_path.stat().st_size
+            if file_size > self.max_file_size:
+                warnings.append(
+                    f"File size ({file_size / 1024 / 1024:.1f}MB) exceeds "
+                    f"maximum ({self.max_file_size / 1024 / 1024:.1f}MB)"
+                )
+                if self.strict_mode:
+                    is_safe = False
+
+            if file_size == 0:
+                return False, ["File is empty"]
+
+            # Read file content for pattern matching
+            with open(pdf_path, 'rb') as f:
+                content = f.read()
+
+            # Verify PDF header
+            if not content.startswith(b'%PDF'):
+                return False, ["Invalid PDF header - file may not be a PDF"]
+
+            # Check for high-risk patterns (always block)
+            for pattern, description in self.HIGH_RISK_PATTERNS:
+                if re.search(pattern, content):
+                    warnings.append(f"HIGH RISK: {description}")
+                    is_safe = False
+
+            # Check for suspicious patterns
+            for pattern, description in self.SUSPICIOUS_PATTERNS:
+                if re.search(pattern, content):
+                    warnings.append(f"Warning: {description}")
+                    if self.strict_mode:
+                        is_safe = False
+
+            # Check for excessive object streams (potential obfuscation)
+            obj_stream_count = len(re.findall(rb'/ObjStm', content))
+            if obj_stream_count > 10:
+                warnings.append(
+                    f"Excessive object streams ({obj_stream_count}) - "
+                    "may indicate obfuscation"
+                )
+                if self.strict_mode:
+                    is_safe = False
+
+            # Log results
+            if warnings:
+                logger.warning(
+                    f"PDF security scan for {pdf_path.name}: "
+                    f"{len(warnings)} warning(s) - Safe: {is_safe}"
+                )
+                for w in warnings:
+                    logger.warning(f"  - {w}")
+            else:
+                logger.debug(f"PDF security scan for {pdf_path.name}: Clean")
+
+        except PermissionError:
+            return False, ["Permission denied reading file"]
+        except Exception as e:
+            logger.error(f"Error scanning {pdf_path}: {e}")
+            return False, [f"Scan error: {str(e)}"]
+
+        return is_safe, warnings
+
+    def scan_batch(self, pdf_paths: List[Path]) -> Dict[str, tuple[bool, List[str]]]:
+        """
+        Scan multiple PDF files.
+
+        Args:
+            pdf_paths: List of paths to PDF files
+
+        Returns:
+            Dictionary mapping filename to (is_safe, warnings) tuple
+        """
+        results = {}
+        for pdf_path in pdf_paths:
+            results[str(pdf_path)] = self.scan_file(pdf_path)
+        return results
+
+
+# =============================================================================
 # DATA CLASSES
 # =============================================================================
 
@@ -347,7 +521,9 @@ class PDFScanner:
         self,
         db: DatabaseManager,
         scan_content: bool = True,
-        use_ocr: bool = False
+        use_ocr: bool = False,
+        enable_malware_scan: bool = True,
+        strict_malware_scan: bool = False
     ):
         """
         Initialize scanner with database connection.
@@ -356,6 +532,8 @@ class PDFScanner:
             db: DatabaseManager instance
             scan_content: Enable PDF content scanning (requires PyPDF2)
             use_ocr: Enable OCR for scanned documents (requires tesseract)
+            enable_malware_scan: Enable PDF malware scanning before processing
+            strict_malware_scan: If True, block on any suspicious pattern
         """
         self.db = db
         self.scan_content = scan_content and PYPDF2_AVAILABLE
@@ -368,6 +546,12 @@ class PDFScanner:
         if self.scan_content:
             self.content_extractor = PDFContentExtractor(use_ocr=use_ocr)
             logger.info("PDF content scanning enabled")
+
+        # Initialize malware scanner
+        self.malware_scanner = None
+        if enable_malware_scan:
+            self.malware_scanner = PDFMalwareScanner(strict_mode=strict_malware_scan)
+            logger.info(f"PDF malware scanning enabled (strict={strict_malware_scan})")
 
     def scan_folder(
         self,
@@ -408,8 +592,22 @@ class PDFScanner:
         content_matches = 0
         ocr_matches = 0
 
+        malware_blocked = 0
+
         for pdf_path in pdf_files:
             try:
+                # Step 0: Malware scan before any processing
+                if self.malware_scanner:
+                    is_safe, warnings = self.malware_scanner.scan_file(pdf_path)
+                    if not is_safe:
+                        logger.warning(
+                            f"BLOCKED: {pdf_path.name} failed malware scan: "
+                            f"{'; '.join(warnings)}"
+                        )
+                        malware_blocked += 1
+                        errors += 1
+                        continue  # Skip this file entirely
+
                 # Step 1: Try filename parsing
                 scanned = self._parse_filename(pdf_path)
                 matched_in_db = False
@@ -451,6 +649,9 @@ class PDFScanner:
             except Exception as e:
                 logger.error(f"Error processing {pdf_path}: {e}")
                 errors += 1
+
+        if malware_blocked > 0:
+            logger.warning(f"Malware scan blocked {malware_blocked} file(s)")
 
         return ScanResult(
             total_files=len(pdf_files),

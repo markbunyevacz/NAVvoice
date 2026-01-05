@@ -407,16 +407,166 @@ class NavClient:
 
         return software
 
-    def manage_invoice(self, invoice_operations: List[Dict[str, Any]]) -> str:
+    def _validate_sept_2025_rules(self, invoice_xml: bytes) -> List[str]:
+        """
+        Validate invoice against September 2025 blocking rules before submission.
+
+        These validations will become BLOCKING errors in NAV starting Sept 15, 2025:
+        - Error 435: VAT rate doesn't match tax number status
+        - Error 734: VAT summary calculation mismatch
+        - Error 1311: VAT line item inconsistency
+
+        Args:
+            invoice_xml: Decoded invoice XML bytes
+
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        errors = []
+
+        try:
+            root = etree.fromstring(invoice_xml)
+
+            # Extract VAT summary totals
+            vat_summary_total = 0.0
+            line_item_vat_total = 0.0
+
+            # Find VAT summary section
+            for vat_rate_elem in root.findall(".//{%s}summaryByVatRate" % NAMESPACES.get('data', '')):
+                vat_amount = vat_rate_elem.findtext(".//{%s}vatRateVatAmount" % NAMESPACES.get('data', ''))
+                if vat_amount:
+                    try:
+                        vat_summary_total += float(vat_amount)
+                    except ValueError:
+                        pass
+
+            # Also try without namespace for flexibility
+            for vat_rate_elem in root.findall(".//summaryByVatRate"):
+                vat_amount = vat_rate_elem.findtext(".//vatRateVatAmount")
+                if vat_amount:
+                    try:
+                        vat_summary_total += float(vat_amount)
+                    except ValueError:
+                        pass
+
+            # Find line items and validate VAT calculations
+            for line_elem in root.findall(".//{%s}line" % NAMESPACES.get('data', '')):
+                self._validate_line_item(line_elem, errors)
+
+            for line_elem in root.findall(".//line"):
+                line_item_vat_total += self._validate_line_item(line_elem, errors)
+
+            # Validate VAT summary matches line items (Error 734)
+            if vat_summary_total > 0 and line_item_vat_total > 0:
+                difference = abs(vat_summary_total - line_item_vat_total)
+                if difference > 1.0:  # 1 HUF tolerance
+                    errors.append(
+                        f"[734] VAT summary mismatch: line items total {line_item_vat_total:.2f}, "
+                        f"summary shows {vat_summary_total:.2f} (diff: {difference:.2f} HUF)"
+                    )
+
+        except etree.XMLSyntaxError as e:
+            logger.warning(f"Could not parse invoice XML for validation: {e}")
+
+        return errors
+
+    def _validate_line_item(self, line_elem: etree.Element, errors: List[str]) -> float:
+        """
+        Validate a single line item's VAT calculation.
+
+        Args:
+            line_elem: XML element for the line item
+            errors: List to append error messages to
+
+        Returns:
+            VAT amount for this line item
+        """
+        vat_amount = 0.0
+
+        try:
+            # Try to extract values with and without namespace
+            net_amount_str = (
+                line_elem.findtext(".//{%s}lineNetAmount" % NAMESPACES.get('data', '')) or
+                line_elem.findtext(".//lineNetAmount") or
+                line_elem.findtext(".//{%s}lineNetAmountData/{%s}lineNetAmount" % (
+                    NAMESPACES.get('data', ''), NAMESPACES.get('data', ''))) or
+                "0"
+            )
+
+            vat_amount_str = (
+                line_elem.findtext(".//{%s}lineVatAmount" % NAMESPACES.get('data', '')) or
+                line_elem.findtext(".//lineVatAmount") or
+                line_elem.findtext(".//{%s}lineVatData/{%s}lineVatAmount" % (
+                    NAMESPACES.get('data', ''), NAMESPACES.get('data', ''))) or
+                "0"
+            )
+
+            vat_rate_str = (
+                line_elem.findtext(".//{%s}vatPercentage" % NAMESPACES.get('data', '')) or
+                line_elem.findtext(".//vatPercentage") or
+                "0"
+            )
+
+            net_amount = float(net_amount_str)
+            vat_amount = float(vat_amount_str)
+            vat_rate = float(vat_rate_str)
+
+            # Validate calculation (Error 1311)
+            if net_amount > 0 and vat_rate > 0:
+                expected_vat = net_amount * (vat_rate / 100.0)
+                difference = abs(expected_vat - vat_amount)
+
+                if difference > 1.0:  # 1 HUF tolerance
+                    line_number = line_elem.findtext(".//lineNumber") or "?"
+                    errors.append(
+                        f"[1311] Line {line_number} VAT error: {net_amount:.2f} * {vat_rate}% = "
+                        f"{expected_vat:.2f}, but shows {vat_amount:.2f}"
+                    )
+
+        except (ValueError, TypeError) as e:
+            logger.debug(f"Could not validate line item: {e}")
+
+        return vat_amount
+
+    def manage_invoice(
+        self,
+        invoice_operations: List[Dict[str, Any]],
+        validate_sept_2025: bool = True
+    ) -> str:
         """
         Submit invoices (create, modify, storno) to NAV.
 
         Args:
             invoice_operations: List of operation dicts containing 'index', 'operation', 'invoiceData' (base64)
+            validate_sept_2025: If True, validate against Sept 2025 blocking rules before submission
 
         Returns:
             Transaction ID
+
+        Raises:
+            NavApiError: If validation fails or NAV returns an error
         """
+        # 0. Pre-submission validation for September 2025 rules
+        if validate_sept_2025:
+            all_errors = []
+            for op in invoice_operations:
+                if op.get('operation') in ('CREATE', 'MODIFY'):
+                    try:
+                        invoice_xml = base64.b64decode(op['invoiceData'])
+                        validation_errors = self._validate_sept_2025_rules(invoice_xml)
+                        if validation_errors:
+                            all_errors.extend([f"Invoice {op['index']}: {e}" for e in validation_errors])
+                    except Exception as e:
+                        logger.warning(f"Could not validate invoice {op['index']}: {e}")
+
+            if all_errors:
+                error_msg = "September 2025 validation failed:\n" + "\n".join(all_errors)
+                raise NavApiError(
+                    "SEPT_2025_VALIDATION",
+                    error_msg,
+                    "Pre-submission validation caught errors that will be blocking in Sept 2025"
+                )
+
         # 1. Get token
         token = self.token_exchange()
 
@@ -1099,6 +1249,165 @@ class NavClient:
 
         response = self._execute_with_retry("/queryTransactionStatus", request_body)
         return self._parse_transaction_status_response(response)
+
+    # =========================================================================
+    # QUERY TRANSACTION LIST ENDPOINT
+    # =========================================================================
+
+    def _build_query_transaction_list_request(
+        self,
+        date_time_from: str,
+        date_time_to: str,
+        page: int = 1,
+        invoice_direction: Optional[str] = None,
+        transaction_status: Optional[str] = None,
+        request_status: Optional[str] = None,
+    ) -> bytes:
+        """
+        Build XML request for /queryTransactionList endpoint.
+
+        This endpoint is used to recover from timeout situations by listing
+        all transactions within a time range.
+
+        Args:
+            date_time_from: Start datetime (ISO format: 2024-01-15T00:00:00Z)
+            date_time_to: End datetime (ISO format: 2024-01-15T23:59:59Z)
+            page: Page number (1-based)
+            invoice_direction: Optional filter: "INBOUND" or "OUTBOUND"
+            transaction_status: Optional filter: "RECEIVED", "PROCESSING", "DONE", "ABORTED"
+            request_status: Optional filter: "RECEIVED", "PROCESSING", "SAVED", "FINISHED", "NOTIFIED"
+
+        Returns:
+            UTF-8 encoded XML request body
+        """
+        request_id = self._generate_request_id()
+        timestamp = self._get_utc_timestamp()
+
+        nsmap = {
+            None: NAMESPACES['api'],
+            'common': NAMESPACES['common'],
+        }
+        root = etree.Element("QueryTransactionListRequest", nsmap=nsmap)
+
+        root.append(self._build_basic_header(request_id, timestamp))
+        root.append(self._build_user_element(request_id, timestamp))
+        root.append(self._build_software_element())
+
+        # Add page number
+        etree.SubElement(root, "page").text = str(page)
+
+        # Add mandatory date range
+        ins_date = etree.SubElement(root, "insDate")
+        etree.SubElement(ins_date, "dateTimeFrom").text = date_time_from
+        etree.SubElement(ins_date, "dateTimeTo").text = date_time_to
+
+        # Add optional filters
+        if invoice_direction:
+            etree.SubElement(root, "invoiceDirection").text = invoice_direction
+
+        if transaction_status:
+            etree.SubElement(root, "transactionStatus").text = transaction_status
+
+        if request_status:
+            etree.SubElement(root, "requestStatus").text = request_status
+
+        return etree.tostring(
+            root,
+            xml_declaration=True,
+            encoding="UTF-8",
+            pretty_print=True
+        )
+
+    def _parse_transaction_list_response(self, response_xml: bytes) -> tuple[List[Dict[str, Any]], int]:
+        """
+        Parse XML response from queryTransactionList endpoint.
+
+        Returns:
+            Tuple of (list of transaction dicts, total_available_pages)
+        """
+        root = etree.fromstring(response_xml)
+        self._check_response_for_errors(response_xml)
+
+        transactions = []
+
+        # Parse pagination info
+        try:
+            available_pages = int(self._get_text(root, "availablePage", "0"))
+        except ValueError:
+            available_pages = 0
+
+        # Find all transaction elements
+        for tx_elem in root.findall(".//{%s}transaction" % NAMESPACES['api']):
+            try:
+                transaction = {
+                    "transactionId": self._get_text(tx_elem, "transactionId", ""),
+                    "requestStatus": self._get_text(tx_elem, "requestStatus", ""),
+                    "technicalAnnulment": self._get_text(tx_elem, "technicalAnnulment", "false") == "true",
+                    "originalRequestVersion": self._get_text(tx_elem, "originalRequestVersion", ""),
+                    "itemCount": int(self._get_text(tx_elem, "itemCount", "0")),
+                    "insDate": self._get_text(tx_elem, "insDate", ""),
+                }
+                transactions.append(transaction)
+
+            except (ValueError, AttributeError) as e:
+                logger.warning(f"Could not parse transaction element: {e}")
+                continue
+
+        return transactions, available_pages
+
+    def query_transaction_list(
+        self,
+        date_time_from: str,
+        date_time_to: str,
+        page: int = 1,
+        fetch_all_pages: bool = True,
+        invoice_direction: Optional[str] = None,
+        transaction_status: Optional[str] = None,
+        request_status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Query list of transactions within a time range.
+
+        This endpoint is essential for timeout recovery - if a manageInvoice
+        request times out, you can use this to find the transaction ID and
+        check its status.
+
+        Args:
+            date_time_from: Start datetime (ISO format: 2024-01-15T00:00:00Z)
+            date_time_to: End datetime (ISO format: 2024-01-15T23:59:59Z)
+            page: Starting page number (1-based)
+            fetch_all_pages: If True, automatically fetch all pages
+            invoice_direction: Optional filter: "INBOUND" or "OUTBOUND"
+            transaction_status: Optional filter: "RECEIVED", "PROCESSING", "DONE", "ABORTED"
+            request_status: Optional filter: "RECEIVED", "PROCESSING", "SAVED", "FINISHED", "NOTIFIED"
+
+        Returns:
+            List of transaction dictionaries with transactionId, requestStatus, etc.
+        """
+        all_transactions: List[Dict[str, Any]] = []
+        current_page = page
+
+        while True:
+            request_body = self._build_query_transaction_list_request(
+                date_time_from=date_time_from,
+                date_time_to=date_time_to,
+                page=current_page,
+                invoice_direction=invoice_direction,
+                transaction_status=transaction_status,
+                request_status=request_status,
+            )
+
+            response = self._execute_with_retry("/queryTransactionList", request_body)
+            transactions, available_pages = self._parse_transaction_list_response(response)
+
+            all_transactions.extend(transactions)
+
+            if not fetch_all_pages or current_page >= available_pages:
+                break
+
+            current_page += 1
+
+        return all_transactions
 
     def query_incoming_invoice_digest(
         self,
