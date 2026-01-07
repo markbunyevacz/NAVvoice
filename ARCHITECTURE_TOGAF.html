@@ -1,0 +1,671 @@
+<!DOCTYPE html><html><head>
+<title>ARCHITECTURE_TOGAF.md</title>
+<meta http-equiv="Content-type" content="text/html;charset=UTF-8">
+
+<style>
+/*
+
+Arduino® Light Theme - Stefania Mellai <s.mellai@arduino.cc>
+
+*/
+
+.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 0.5em;
+  background: #FFFFFF;
+}
+
+.hljs,
+.hljs-subst {
+  color: #434f54;
+}
+
+.hljs-keyword,
+.hljs-attribute,
+.hljs-selector-tag,
+.hljs-doctag,
+.hljs-name {
+  color: #00979D;
+}
+
+.hljs-built_in,
+.hljs-literal,
+.hljs-bullet,
+.hljs-code,
+.hljs-addition {
+  color: #D35400;
+}
+
+.hljs-regexp,
+.hljs-symbol,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-link,
+.hljs-selector-attr,
+.hljs-selector-pseudo {
+  color: #00979D;
+}
+
+.hljs-type,
+.hljs-string,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-quote,
+.hljs-template-tag,
+.hljs-deletion {
+  color: #005C5F;
+}
+
+.hljs-title,
+.hljs-section {
+  color: #880000;
+  font-weight: bold;
+}
+
+.hljs-comment {
+  color: rgba(149,165,166,.8);
+}
+
+.hljs-meta-keyword {
+  color: #728E00;
+}
+
+.hljs-meta {
+  color: #434f54;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: bold;
+}
+
+.hljs-function {
+  color: #728E00;
+}
+
+.hljs-number {
+  color: #8A7B52;  
+}
+
+</style>
+
+<style>
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+body {
+	font-family:   "HelveticaNeue-Light", sans-serif, "宋体","Segoe WPC", "Segoe UI", "SFUIText-Light","Droid Sans Fallback";
+	font-size: 18px;
+	padding: 0 12px;
+	line-height: 1.6;
+	word-wrap: break-word;
+	color: #333333;
+}
+
+.content-wrapper{
+	max-width: 860px;
+    margin: 0 auto;
+    padding: 0 30px;
+}
+
+#code-csp-warning {
+	position: fixed;
+	top: 0;
+	right: 0;
+	color: white;
+	margin: 16px;
+	text-align: center;
+	font-size: 12px;
+	font-family: sans-serif;
+	background-color:#444444;
+	cursor: pointer;
+	padding: 6px;
+	box-shadow: 1px 1px 1px rgba(0,0,0,.25);
+}
+
+#code-csp-warning:hover {
+	text-decoration: none;
+	background-color:#007acc;
+	box-shadow: 2px 2px 2px rgba(0,0,0,.25);
+}
+
+
+body.scrollBeyondLastLine {
+	margin-bottom: calc(100vh - 22px);
+}
+
+body.showEditorSelection .code-line {
+	position: relative;
+}
+
+body.showEditorSelection .code-active-line:before,
+body.showEditorSelection .code-line:hover:before {
+	content: "";
+	display: block;
+	position: absolute;
+	top: 0;
+	left: -12px;
+	height: 100%;
+}
+
+body.showEditorSelection li.code-active-line:before,
+body.showEditorSelection li.code-line:hover:before {
+	left: -30px;
+}
+
+.vscode-light.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.15);
+}
+
+.vscode-light.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.40);
+}
+
+.vscode-dark.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.4);
+}
+
+.vscode-dark.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.60);
+}
+
+.vscode-high-contrast.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 160, 0, 0.7);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 160, 0, 1);
+}
+
+img {
+	max-width: 100%;
+	max-height: 100%;
+}
+
+a {
+	color: #4080D0;
+	text-decoration: none;
+}
+
+a:focus,
+input:focus,
+select:focus,
+textarea:focus {
+	outline: 1px solid -webkit-focus-ring-color;
+	outline-offset: -1px;
+}
+
+hr {
+	border: 0;
+	height: 2px;
+	border-bottom: 2px solid;
+}
+
+h1 {
+	padding-bottom: 0.3em;
+	line-height: 1.2;
+	border-bottom: 1px solid #eee;
+}
+
+
+h2{
+	padding-bottom: .3em;
+    font-size: 2em;
+    line-height: 1.225;
+    border-bottom: 1px solid #eee;
+}
+
+h3{
+	font-size: 1.75em;
+    line-height: 1.225;
+}
+
+h1, h2, h3 {
+	font-weight: bold;
+}
+
+h1 code,
+h2 code,
+h3 code,
+h4 code,
+h5 code,
+h6 code {
+	font-size: inherit;
+	line-height: auto;
+}
+
+a:hover {
+	color: #4080D0;
+	text-decoration: underline;
+}
+
+table {
+	border-collapse: collapse;
+}
+
+table > thead > tr > th {
+	text-align: left;
+	border-bottom: 1px solid;
+}
+
+table > thead > tr > th,
+table > thead > tr > td,
+table > tbody > tr > th,
+table > tbody > tr > td {
+	padding: 5px 10px;
+}
+
+table > tbody > tr + tr > td {
+	border-top: 1px solid;
+}
+
+blockquote {
+	margin: 0 7px 0 5px;
+	padding: 0 16px 0 10px;
+	border-left: 5px solid;
+}
+
+code {
+	font-family: Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace, "Droid Sans Fallback";
+	font-size: 14px;
+	line-height: 19px;
+}
+
+body.wordWrap pre {
+	white-space: pre-wrap;
+}
+
+.mac code {
+	font-size: 12px;
+	line-height: 18px;
+}
+
+pre:not(.hljs),
+pre.hljs code > div {
+	padding: 16px;
+	border-radius: 3px;
+	overflow: auto;
+}
+
+/** Theming */
+
+.vscode-light,
+.vscode-light pre code {
+	color: rgb(30, 30, 30);
+}
+
+.vscode-dark,
+.vscode-dark pre code {
+	color: #DDD;
+}
+
+.vscode-high-contrast,
+.vscode-high-contrast pre code {
+	color: white;
+}
+
+.vscode-light code {
+	color: #A31515;
+}
+
+.vscode-dark code {
+	color: #D7BA7D;
+}
+
+.vscode-light pre:not(.hljs),
+.vscode-light code > div {
+	background-color: rgba(220, 220, 220, 0.4);
+}
+
+.vscode-dark pre:not(.hljs),
+.vscode-dark code > div {
+	background-color: rgba(10, 10, 10, 0.4);
+}
+
+.vscode-high-contrast pre:not(.hljs),
+.vscode-high-contrast code > div {
+	background-color: rgb(0, 0, 0);
+}
+
+.vscode-high-contrast h1 {
+	border-color: rgb(0, 0, 0);
+}
+
+.vscode-light table > thead > tr > th {
+	border-color: rgba(0, 0, 0, 0.69);
+}
+
+.vscode-dark table > thead > tr > th {
+	border-color: rgba(255, 255, 255, 0.69);
+}
+
+.vscode-light h1,
+.vscode-light hr,
+.vscode-light table > tbody > tr + tr > td {
+	border-color: rgba(0, 0, 0, 0.18);
+}
+
+.vscode-dark h1,
+.vscode-dark hr,
+.vscode-dark table > tbody > tr + tr > td {
+	border-color: rgba(255, 255, 255, 0.18);
+}
+
+.vscode-light blockquote,
+.vscode-dark blockquote {
+	background: rgba(127, 127, 127, 0.1);
+	border-color: rgba(0, 122, 204, 0.5);
+}
+
+.vscode-high-contrast blockquote {
+	background: transparent;
+	border-color: #fff;
+}
+</style>
+
+<style>
+pre {
+	background-color: #f8f8f8;
+	border: 1px solid #cccccc;
+	border-radius: 3px;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+}
+
+pre:not(.hljs) {
+	padding: 23px;
+	line-height: 19px;
+}
+
+blockquote {
+	background: rgba(127, 127, 127, 0.1);
+	border-color: rgba(0, 122, 204, 0.5);
+}
+
+.emoji {
+	height: 1.4em;
+}
+
+/* for inline code */
+:not(pre):not(.hljs) > code {
+	color: #C9AE75; /* Change the old color so it seems less like an error */
+	font-size: inherit;
+}
+
+/* Page Break : use <div class="page"/> to insert page break
+-------------------------------------------------------- */
+.page {
+	page-break-after: always;
+}
+
+.table-of-contents li{
+	list-style-type: initial;
+}
+</style>
+
+<style>
+@font-face{font-family:KaTeX_AMS;font-style:normal;font-weight:400;src:url(fonts/KaTeX_AMS-Regular.woff2) format("woff2"),url(fonts/KaTeX_AMS-Regular.woff) format("woff"),url(fonts/KaTeX_AMS-Regular.ttf) format("truetype")}@font-face{font-family:KaTeX_Caligraphic;font-style:normal;font-weight:700;src:url(fonts/KaTeX_Caligraphic-Bold.woff2) format("woff2"),url(fonts/KaTeX_Caligraphic-Bold.woff) format("woff"),url(fonts/KaTeX_Caligraphic-Bold.ttf) format("truetype")}@font-face{font-family:KaTeX_Caligraphic;font-style:normal;font-weight:400;src:url(fonts/KaTeX_Caligraphic-Regular.woff2) format("woff2"),url(fonts/KaTeX_Caligraphic-Regular.woff) format("woff"),url(fonts/KaTeX_Caligraphic-Regular.ttf) format("truetype")}@font-face{font-family:KaTeX_Fraktur;font-style:normal;font-weight:700;src:url(fonts/KaTeX_Fraktur-Bold.woff2) format("woff2"),url(fonts/KaTeX_Fraktur-Bold.woff) format("woff"),url(fonts/KaTeX_Fraktur-Bold.ttf) format("truetype")}@font-face{font-family:KaTeX_Fraktur;font-style:normal;font-weight:400;src:url(fonts/KaTeX_Fraktur-Regular.woff2) format("woff2"),url(fonts/KaTeX_Fraktur-Regular.woff) format("woff"),url(fonts/KaTeX_Fraktur-Regular.ttf) format("truetype")}@font-face{font-family:KaTeX_Main;font-style:normal;font-weight:700;src:url(fonts/KaTeX_Main-Bold.woff2) format("woff2"),url(fonts/KaTeX_Main-Bold.woff) format("woff"),url(fonts/KaTeX_Main-Bold.ttf) format("truetype")}@font-face{font-family:KaTeX_Main;font-style:italic;font-weight:700;src:url(fonts/KaTeX_Main-BoldItalic.woff2) format("woff2"),url(fonts/KaTeX_Main-BoldItalic.woff) format("woff"),url(fonts/KaTeX_Main-BoldItalic.ttf) format("truetype")}@font-face{font-family:KaTeX_Main;font-style:italic;font-weight:400;src:url(fonts/KaTeX_Main-Italic.woff2) format("woff2"),url(fonts/KaTeX_Main-Italic.woff) format("woff"),url(fonts/KaTeX_Main-Italic.ttf) format("truetype")}@font-face{font-family:KaTeX_Main;font-style:normal;font-weight:400;src:url(fonts/KaTeX_Main-Regular.woff2) format("woff2"),url(fonts/KaTeX_Main-Regular.woff) format("woff"),url(fonts/KaTeX_Main-Regular.ttf) format("truetype")}@font-face{font-family:KaTeX_Math;font-style:italic;font-weight:700;src:url(fonts/KaTeX_Math-BoldItalic.woff2) format("woff2"),url(fonts/KaTeX_Math-BoldItalic.woff) format("woff"),url(fonts/KaTeX_Math-BoldItalic.ttf) format("truetype")}@font-face{font-family:KaTeX_Math;font-style:italic;font-weight:400;src:url(fonts/KaTeX_Math-Italic.woff2) format("woff2"),url(fonts/KaTeX_Math-Italic.woff) format("woff"),url(fonts/KaTeX_Math-Italic.ttf) format("truetype")}@font-face{font-family:"KaTeX_SansSerif";font-style:normal;font-weight:700;src:url(fonts/KaTeX_SansSerif-Bold.woff2) format("woff2"),url(fonts/KaTeX_SansSerif-Bold.woff) format("woff"),url(fonts/KaTeX_SansSerif-Bold.ttf) format("truetype")}@font-face{font-family:"KaTeX_SansSerif";font-style:italic;font-weight:400;src:url(fonts/KaTeX_SansSerif-Italic.woff2) format("woff2"),url(fonts/KaTeX_SansSerif-Italic.woff) format("woff"),url(fonts/KaTeX_SansSerif-Italic.ttf) format("truetype")}@font-face{font-family:"KaTeX_SansSerif";font-style:normal;font-weight:400;src:url(fonts/KaTeX_SansSerif-Regular.woff2) format("woff2"),url(fonts/KaTeX_SansSerif-Regular.woff) format("woff"),url(fonts/KaTeX_SansSerif-Regular.ttf) format("truetype")}@font-face{font-family:KaTeX_Script;font-style:normal;font-weight:400;src:url(fonts/KaTeX_Script-Regular.woff2) format("woff2"),url(fonts/KaTeX_Script-Regular.woff) format("woff"),url(fonts/KaTeX_Script-Regular.ttf) format("truetype")}@font-face{font-family:KaTeX_Size1;font-style:normal;font-weight:400;src:url(fonts/KaTeX_Size1-Regular.woff2) format("woff2"),url(fonts/KaTeX_Size1-Regular.woff) format("woff"),url(fonts/KaTeX_Size1-Regular.ttf) format("truetype")}@font-face{font-family:KaTeX_Size2;font-style:normal;font-weight:400;src:url(fonts/KaTeX_Size2-Regular.woff2) format("woff2"),url(fonts/KaTeX_Size2-Regular.woff) format("woff"),url(fonts/KaTeX_Size2-Regular.ttf) format("truetype")}@font-face{font-family:KaTeX_Size3;font-style:normal;font-weight:400;src:url(fonts/KaTeX_Size3-Regular.woff2) format("woff2"),url(fonts/KaTeX_Size3-Regular.woff) format("woff"),url(fonts/KaTeX_Size3-Regular.ttf) format("truetype")}@font-face{font-family:KaTeX_Size4;font-style:normal;font-weight:400;src:url(fonts/KaTeX_Size4-Regular.woff2) format("woff2"),url(fonts/KaTeX_Size4-Regular.woff) format("woff"),url(fonts/KaTeX_Size4-Regular.ttf) format("truetype")}@font-face{font-family:KaTeX_Typewriter;font-style:normal;font-weight:400;src:url(fonts/KaTeX_Typewriter-Regular.woff2) format("woff2"),url(fonts/KaTeX_Typewriter-Regular.woff) format("woff"),url(fonts/KaTeX_Typewriter-Regular.ttf) format("truetype")}.katex{text-rendering:auto;font:normal 1.21em KaTeX_Main,Times New Roman,serif;line-height:1.2;text-indent:0}.katex *{-ms-high-contrast-adjust:none!important;border-color:currentColor}.katex .katex-version:after{content:"0.16.2"}.katex .katex-mathml{clip:rect(1px,1px,1px,1px);border:0;height:1px;overflow:hidden;padding:0;position:absolute;width:1px}.katex .katex-html>.newline{display:block}.katex .base{position:relative;white-space:nowrap;width:-webkit-min-content;width:-moz-min-content;width:min-content}.katex .base,.katex .strut{display:inline-block}.katex .textbf{font-weight:700}.katex .textit{font-style:italic}.katex .textrm{font-family:KaTeX_Main}.katex .textsf{font-family:KaTeX_SansSerif}.katex .texttt{font-family:KaTeX_Typewriter}.katex .mathnormal{font-family:KaTeX_Math;font-style:italic}.katex .mathit{font-family:KaTeX_Main;font-style:italic}.katex .mathrm{font-style:normal}.katex .mathbf{font-family:KaTeX_Main;font-weight:700}.katex .boldsymbol{font-family:KaTeX_Math;font-style:italic;font-weight:700}.katex .amsrm,.katex .mathbb,.katex .textbb{font-family:KaTeX_AMS}.katex .mathcal{font-family:KaTeX_Caligraphic}.katex .mathfrak,.katex .textfrak{font-family:KaTeX_Fraktur}.katex .mathtt{font-family:KaTeX_Typewriter}.katex .mathscr,.katex .textscr{font-family:KaTeX_Script}.katex .mathsf,.katex .textsf{font-family:KaTeX_SansSerif}.katex .mathboldsf,.katex .textboldsf{font-family:KaTeX_SansSerif;font-weight:700}.katex .mathitsf,.katex .textitsf{font-family:KaTeX_SansSerif;font-style:italic}.katex .mainrm{font-family:KaTeX_Main;font-style:normal}.katex .vlist-t{border-collapse:collapse;display:inline-table;table-layout:fixed}.katex .vlist-r{display:table-row}.katex .vlist{display:table-cell;position:relative;vertical-align:bottom}.katex .vlist>span{display:block;height:0;position:relative}.katex .vlist>span>span{display:inline-block}.katex .vlist>span>.pstrut{overflow:hidden;width:0}.katex .vlist-t2{margin-right:-2px}.katex .vlist-s{display:table-cell;font-size:1px;min-width:2px;vertical-align:bottom;width:2px}.katex .vbox{align-items:baseline;display:inline-flex;flex-direction:column}.katex .hbox{width:100%}.katex .hbox,.katex .thinbox{display:inline-flex;flex-direction:row}.katex .thinbox{max-width:0;width:0}.katex .msupsub{text-align:left}.katex .mfrac>span>span{text-align:center}.katex .mfrac .frac-line{border-bottom-style:solid;display:inline-block;width:100%}.katex .hdashline,.katex .hline,.katex .mfrac .frac-line,.katex .overline .overline-line,.katex .rule,.katex .underline .underline-line{min-height:1px}.katex .mspace{display:inline-block}.katex .clap,.katex .llap,.katex .rlap{position:relative;width:0}.katex .clap>.inner,.katex .llap>.inner,.katex .rlap>.inner{position:absolute}.katex .clap>.fix,.katex .llap>.fix,.katex .rlap>.fix{display:inline-block}.katex .llap>.inner{right:0}.katex .clap>.inner,.katex .rlap>.inner{left:0}.katex .clap>.inner>span{margin-left:-50%;margin-right:50%}.katex .rule{border:0 solid;display:inline-block;position:relative}.katex .hline,.katex .overline .overline-line,.katex .underline .underline-line{border-bottom-style:solid;display:inline-block;width:100%}.katex .hdashline{border-bottom-style:dashed;display:inline-block;width:100%}.katex .sqrt>.root{margin-left:.27777778em;margin-right:-.55555556em}.katex .fontsize-ensurer.reset-size1.size1,.katex .sizing.reset-size1.size1{font-size:1em}.katex .fontsize-ensurer.reset-size1.size2,.katex .sizing.reset-size1.size2{font-size:1.2em}.katex .fontsize-ensurer.reset-size1.size3,.katex .sizing.reset-size1.size3{font-size:1.4em}.katex .fontsize-ensurer.reset-size1.size4,.katex .sizing.reset-size1.size4{font-size:1.6em}.katex .fontsize-ensurer.reset-size1.size5,.katex .sizing.reset-size1.size5{font-size:1.8em}.katex .fontsize-ensurer.reset-size1.size6,.katex .sizing.reset-size1.size6{font-size:2em}.katex .fontsize-ensurer.reset-size1.size7,.katex .sizing.reset-size1.size7{font-size:2.4em}.katex .fontsize-ensurer.reset-size1.size8,.katex .sizing.reset-size1.size8{font-size:2.88em}.katex .fontsize-ensurer.reset-size1.size9,.katex .sizing.reset-size1.size9{font-size:3.456em}.katex .fontsize-ensurer.reset-size1.size10,.katex .sizing.reset-size1.size10{font-size:4.148em}.katex .fontsize-ensurer.reset-size1.size11,.katex .sizing.reset-size1.size11{font-size:4.976em}.katex .fontsize-ensurer.reset-size2.size1,.katex .sizing.reset-size2.size1{font-size:.83333333em}.katex .fontsize-ensurer.reset-size2.size2,.katex .sizing.reset-size2.size2{font-size:1em}.katex .fontsize-ensurer.reset-size2.size3,.katex .sizing.reset-size2.size3{font-size:1.16666667em}.katex .fontsize-ensurer.reset-size2.size4,.katex .sizing.reset-size2.size4{font-size:1.33333333em}.katex .fontsize-ensurer.reset-size2.size5,.katex .sizing.reset-size2.size5{font-size:1.5em}.katex .fontsize-ensurer.reset-size2.size6,.katex .sizing.reset-size2.size6{font-size:1.66666667em}.katex .fontsize-ensurer.reset-size2.size7,.katex .sizing.reset-size2.size7{font-size:2em}.katex .fontsize-ensurer.reset-size2.size8,.katex .sizing.reset-size2.size8{font-size:2.4em}.katex .fontsize-ensurer.reset-size2.size9,.katex .sizing.reset-size2.size9{font-size:2.88em}.katex .fontsize-ensurer.reset-size2.size10,.katex .sizing.reset-size2.size10{font-size:3.45666667em}.katex .fontsize-ensurer.reset-size2.size11,.katex .sizing.reset-size2.size11{font-size:4.14666667em}.katex .fontsize-ensurer.reset-size3.size1,.katex .sizing.reset-size3.size1{font-size:.71428571em}.katex .fontsize-ensurer.reset-size3.size2,.katex .sizing.reset-size3.size2{font-size:.85714286em}.katex .fontsize-ensurer.reset-size3.size3,.katex .sizing.reset-size3.size3{font-size:1em}.katex .fontsize-ensurer.reset-size3.size4,.katex .sizing.reset-size3.size4{font-size:1.14285714em}.katex .fontsize-ensurer.reset-size3.size5,.katex .sizing.reset-size3.size5{font-size:1.28571429em}.katex .fontsize-ensurer.reset-size3.size6,.katex .sizing.reset-size3.size6{font-size:1.42857143em}.katex .fontsize-ensurer.reset-size3.size7,.katex .sizing.reset-size3.size7{font-size:1.71428571em}.katex .fontsize-ensurer.reset-size3.size8,.katex .sizing.reset-size3.size8{font-size:2.05714286em}.katex .fontsize-ensurer.reset-size3.size9,.katex .sizing.reset-size3.size9{font-size:2.46857143em}.katex .fontsize-ensurer.reset-size3.size10,.katex .sizing.reset-size3.size10{font-size:2.96285714em}.katex .fontsize-ensurer.reset-size3.size11,.katex .sizing.reset-size3.size11{font-size:3.55428571em}.katex .fontsize-ensurer.reset-size4.size1,.katex .sizing.reset-size4.size1{font-size:.625em}.katex .fontsize-ensurer.reset-size4.size2,.katex .sizing.reset-size4.size2{font-size:.75em}.katex .fontsize-ensurer.reset-size4.size3,.katex .sizing.reset-size4.size3{font-size:.875em}.katex .fontsize-ensurer.reset-size4.size4,.katex .sizing.reset-size4.size4{font-size:1em}.katex .fontsize-ensurer.reset-size4.size5,.katex .sizing.reset-size4.size5{font-size:1.125em}.katex .fontsize-ensurer.reset-size4.size6,.katex .sizing.reset-size4.size6{font-size:1.25em}.katex .fontsize-ensurer.reset-size4.size7,.katex .sizing.reset-size4.size7{font-size:1.5em}.katex .fontsize-ensurer.reset-size4.size8,.katex .sizing.reset-size4.size8{font-size:1.8em}.katex .fontsize-ensurer.reset-size4.size9,.katex .sizing.reset-size4.size9{font-size:2.16em}.katex .fontsize-ensurer.reset-size4.size10,.katex .sizing.reset-size4.size10{font-size:2.5925em}.katex .fontsize-ensurer.reset-size4.size11,.katex .sizing.reset-size4.size11{font-size:3.11em}.katex .fontsize-ensurer.reset-size5.size1,.katex .sizing.reset-size5.size1{font-size:.55555556em}.katex .fontsize-ensurer.reset-size5.size2,.katex .sizing.reset-size5.size2{font-size:.66666667em}.katex .fontsize-ensurer.reset-size5.size3,.katex .sizing.reset-size5.size3{font-size:.77777778em}.katex .fontsize-ensurer.reset-size5.size4,.katex .sizing.reset-size5.size4{font-size:.88888889em}.katex .fontsize-ensurer.reset-size5.size5,.katex .sizing.reset-size5.size5{font-size:1em}.katex .fontsize-ensurer.reset-size5.size6,.katex .sizing.reset-size5.size6{font-size:1.11111111em}.katex .fontsize-ensurer.reset-size5.size7,.katex .sizing.reset-size5.size7{font-size:1.33333333em}.katex .fontsize-ensurer.reset-size5.size8,.katex .sizing.reset-size5.size8{font-size:1.6em}.katex .fontsize-ensurer.reset-size5.size9,.katex .sizing.reset-size5.size9{font-size:1.92em}.katex .fontsize-ensurer.reset-size5.size10,.katex .sizing.reset-size5.size10{font-size:2.30444444em}.katex .fontsize-ensurer.reset-size5.size11,.katex .sizing.reset-size5.size11{font-size:2.76444444em}.katex .fontsize-ensurer.reset-size6.size1,.katex .sizing.reset-size6.size1{font-size:.5em}.katex .fontsize-ensurer.reset-size6.size2,.katex .sizing.reset-size6.size2{font-size:.6em}.katex .fontsize-ensurer.reset-size6.size3,.katex .sizing.reset-size6.size3{font-size:.7em}.katex .fontsize-ensurer.reset-size6.size4,.katex .sizing.reset-size6.size4{font-size:.8em}.katex .fontsize-ensurer.reset-size6.size5,.katex .sizing.reset-size6.size5{font-size:.9em}.katex .fontsize-ensurer.reset-size6.size6,.katex .sizing.reset-size6.size6{font-size:1em}.katex .fontsize-ensurer.reset-size6.size7,.katex .sizing.reset-size6.size7{font-size:1.2em}.katex .fontsize-ensurer.reset-size6.size8,.katex .sizing.reset-size6.size8{font-size:1.44em}.katex .fontsize-ensurer.reset-size6.size9,.katex .sizing.reset-size6.size9{font-size:1.728em}.katex .fontsize-ensurer.reset-size6.size10,.katex .sizing.reset-size6.size10{font-size:2.074em}.katex .fontsize-ensurer.reset-size6.size11,.katex .sizing.reset-size6.size11{font-size:2.488em}.katex .fontsize-ensurer.reset-size7.size1,.katex .sizing.reset-size7.size1{font-size:.41666667em}.katex .fontsize-ensurer.reset-size7.size2,.katex .sizing.reset-size7.size2{font-size:.5em}.katex .fontsize-ensurer.reset-size7.size3,.katex .sizing.reset-size7.size3{font-size:.58333333em}.katex .fontsize-ensurer.reset-size7.size4,.katex .sizing.reset-size7.size4{font-size:.66666667em}.katex .fontsize-ensurer.reset-size7.size5,.katex .sizing.reset-size7.size5{font-size:.75em}.katex .fontsize-ensurer.reset-size7.size6,.katex .sizing.reset-size7.size6{font-size:.83333333em}.katex .fontsize-ensurer.reset-size7.size7,.katex .sizing.reset-size7.size7{font-size:1em}.katex .fontsize-ensurer.reset-size7.size8,.katex .sizing.reset-size7.size8{font-size:1.2em}.katex .fontsize-ensurer.reset-size7.size9,.katex .sizing.reset-size7.size9{font-size:1.44em}.katex .fontsize-ensurer.reset-size7.size10,.katex .sizing.reset-size7.size10{font-size:1.72833333em}.katex .fontsize-ensurer.reset-size7.size11,.katex .sizing.reset-size7.size11{font-size:2.07333333em}.katex .fontsize-ensurer.reset-size8.size1,.katex .sizing.reset-size8.size1{font-size:.34722222em}.katex .fontsize-ensurer.reset-size8.size2,.katex .sizing.reset-size8.size2{font-size:.41666667em}.katex .fontsize-ensurer.reset-size8.size3,.katex .sizing.reset-size8.size3{font-size:.48611111em}.katex .fontsize-ensurer.reset-size8.size4,.katex .sizing.reset-size8.size4{font-size:.55555556em}.katex .fontsize-ensurer.reset-size8.size5,.katex .sizing.reset-size8.size5{font-size:.625em}.katex .fontsize-ensurer.reset-size8.size6,.katex .sizing.reset-size8.size6{font-size:.69444444em}.katex .fontsize-ensurer.reset-size8.size7,.katex .sizing.reset-size8.size7{font-size:.83333333em}.katex .fontsize-ensurer.reset-size8.size8,.katex .sizing.reset-size8.size8{font-size:1em}.katex .fontsize-ensurer.reset-size8.size9,.katex .sizing.reset-size8.size9{font-size:1.2em}.katex .fontsize-ensurer.reset-size8.size10,.katex .sizing.reset-size8.size10{font-size:1.44027778em}.katex .fontsize-ensurer.reset-size8.size11,.katex .sizing.reset-size8.size11{font-size:1.72777778em}.katex .fontsize-ensurer.reset-size9.size1,.katex .sizing.reset-size9.size1{font-size:.28935185em}.katex .fontsize-ensurer.reset-size9.size2,.katex .sizing.reset-size9.size2{font-size:.34722222em}.katex .fontsize-ensurer.reset-size9.size3,.katex .sizing.reset-size9.size3{font-size:.40509259em}.katex .fontsize-ensurer.reset-size9.size4,.katex .sizing.reset-size9.size4{font-size:.46296296em}.katex .fontsize-ensurer.reset-size9.size5,.katex .sizing.reset-size9.size5{font-size:.52083333em}.katex .fontsize-ensurer.reset-size9.size6,.katex .sizing.reset-size9.size6{font-size:.5787037em}.katex .fontsize-ensurer.reset-size9.size7,.katex .sizing.reset-size9.size7{font-size:.69444444em}.katex .fontsize-ensurer.reset-size9.size8,.katex .sizing.reset-size9.size8{font-size:.83333333em}.katex .fontsize-ensurer.reset-size9.size9,.katex .sizing.reset-size9.size9{font-size:1em}.katex .fontsize-ensurer.reset-size9.size10,.katex .sizing.reset-size9.size10{font-size:1.20023148em}.katex .fontsize-ensurer.reset-size9.size11,.katex .sizing.reset-size9.size11{font-size:1.43981481em}.katex .fontsize-ensurer.reset-size10.size1,.katex .sizing.reset-size10.size1{font-size:.24108004em}.katex .fontsize-ensurer.reset-size10.size2,.katex .sizing.reset-size10.size2{font-size:.28929605em}.katex .fontsize-ensurer.reset-size10.size3,.katex .sizing.reset-size10.size3{font-size:.33751205em}.katex .fontsize-ensurer.reset-size10.size4,.katex .sizing.reset-size10.size4{font-size:.38572806em}.katex .fontsize-ensurer.reset-size10.size5,.katex .sizing.reset-size10.size5{font-size:.43394407em}.katex .fontsize-ensurer.reset-size10.size6,.katex .sizing.reset-size10.size6{font-size:.48216008em}.katex .fontsize-ensurer.reset-size10.size7,.katex .sizing.reset-size10.size7{font-size:.57859209em}.katex .fontsize-ensurer.reset-size10.size8,.katex .sizing.reset-size10.size8{font-size:.69431051em}.katex .fontsize-ensurer.reset-size10.size9,.katex .sizing.reset-size10.size9{font-size:.83317261em}.katex .fontsize-ensurer.reset-size10.size10,.katex .sizing.reset-size10.size10{font-size:1em}.katex .fontsize-ensurer.reset-size10.size11,.katex .sizing.reset-size10.size11{font-size:1.19961427em}.katex .fontsize-ensurer.reset-size11.size1,.katex .sizing.reset-size11.size1{font-size:.20096463em}.katex .fontsize-ensurer.reset-size11.size2,.katex .sizing.reset-size11.size2{font-size:.24115756em}.katex .fontsize-ensurer.reset-size11.size3,.katex .sizing.reset-size11.size3{font-size:.28135048em}.katex .fontsize-ensurer.reset-size11.size4,.katex .sizing.reset-size11.size4{font-size:.32154341em}.katex .fontsize-ensurer.reset-size11.size5,.katex .sizing.reset-size11.size5{font-size:.36173633em}.katex .fontsize-ensurer.reset-size11.size6,.katex .sizing.reset-size11.size6{font-size:.40192926em}.katex .fontsize-ensurer.reset-size11.size7,.katex .sizing.reset-size11.size7{font-size:.48231511em}.katex .fontsize-ensurer.reset-size11.size8,.katex .sizing.reset-size11.size8{font-size:.57877814em}.katex .fontsize-ensurer.reset-size11.size9,.katex .sizing.reset-size11.size9{font-size:.69453376em}.katex .fontsize-ensurer.reset-size11.size10,.katex .sizing.reset-size11.size10{font-size:.83360129em}.katex .fontsize-ensurer.reset-size11.size11,.katex .sizing.reset-size11.size11{font-size:1em}.katex .delimsizing.size1{font-family:KaTeX_Size1}.katex .delimsizing.size2{font-family:KaTeX_Size2}.katex .delimsizing.size3{font-family:KaTeX_Size3}.katex .delimsizing.size4{font-family:KaTeX_Size4}.katex .delimsizing.mult .delim-size1>span{font-family:KaTeX_Size1}.katex .delimsizing.mult .delim-size4>span{font-family:KaTeX_Size4}.katex .nulldelimiter{display:inline-block;width:.12em}.katex .delimcenter,.katex .op-symbol{position:relative}.katex .op-symbol.small-op{font-family:KaTeX_Size1}.katex .op-symbol.large-op{font-family:KaTeX_Size2}.katex .accent>.vlist-t,.katex .op-limits>.vlist-t{text-align:center}.katex .accent .accent-body{position:relative}.katex .accent .accent-body:not(.accent-full){width:0}.katex .overlay{display:block}.katex .mtable .vertical-separator{display:inline-block;min-width:1px}.katex .mtable .arraycolsep{display:inline-block}.katex .mtable .col-align-c>.vlist-t{text-align:center}.katex .mtable .col-align-l>.vlist-t{text-align:left}.katex .mtable .col-align-r>.vlist-t{text-align:right}.katex .svg-align{text-align:left}.katex svg{fill:currentColor;stroke:currentColor;fill-rule:nonzero;fill-opacity:1;stroke-width:1;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;display:block;height:inherit;position:absolute;width:100%}.katex svg path{stroke:none}.katex img{border-style:none;max-height:none;max-width:none;min-height:0;min-width:0}.katex .stretchy{display:block;overflow:hidden;position:relative;width:100%}.katex .stretchy:after,.katex .stretchy:before{content:""}.katex .hide-tail{overflow:hidden;position:relative;width:100%}.katex .halfarrow-left{left:0;overflow:hidden;position:absolute;width:50.2%}.katex .halfarrow-right{overflow:hidden;position:absolute;right:0;width:50.2%}.katex .brace-left{left:0;overflow:hidden;position:absolute;width:25.1%}.katex .brace-center{left:25%;overflow:hidden;position:absolute;width:50%}.katex .brace-right{overflow:hidden;position:absolute;right:0;width:25.1%}.katex .x-arrow-pad{padding:0 .5em}.katex .cd-arrow-pad{padding:0 .55556em 0 .27778em}.katex .mover,.katex .munder,.katex .x-arrow{text-align:center}.katex .boxpad{padding:0 .3em}.katex .fbox,.katex .fcolorbox{border:.04em solid;box-sizing:border-box}.katex .cancel-pad{padding:0 .2em}.katex .cancel-lap{margin-left:-.2em;margin-right:-.2em}.katex .sout{border-bottom-style:solid;border-bottom-width:.08em}.katex .angl{border-right:.049em solid;border-top:.049em solid;box-sizing:border-box;margin-right:.03889em}.katex .anglpad{padding:0 .03889em}.katex .eqn-num:before{content:"(" counter(katexEqnNo) ")";counter-increment:katexEqnNo}.katex .mml-eqn-num:before{content:"(" counter(mmlEqnNo) ")";counter-increment:mmlEqnNo}.katex .mtr-glue{width:50%}.katex .cd-vert-arrow{display:inline-block;position:relative}.katex .cd-label-left{display:inline-block;position:absolute;right:calc(50% + .3em);text-align:left}.katex .cd-label-right{display:inline-block;left:calc(50% + .3em);position:absolute;text-align:right}.katex-display{display:block;margin:1em 0;text-align:center}.katex-display>.katex{display:block;text-align:center;white-space:nowrap}.katex-display>.katex>.katex-html{display:block;position:relative}.katex-display>.katex>.katex-html>.tag{position:absolute;right:0}.katex-display.leqno>.katex>.katex-html>.tag{left:0;right:auto}.katex-display.fleqn>.katex{padding-left:2em;text-align:left}body{counter-reset:katexEqnNo mmlEqnNo}
+
+</style>
+
+</head>
+<body>
+    <div class="content-wrapper">
+        <h2 id="navvoice-architecture-(togaf%E2%80%91aligned)" tabindex="-1">NAVvoice Architecture (TOGAF‑Aligned)</h2>
+<p><strong>Version</strong>: 1.0<br>
+<strong>Date</strong>: 2025-12-16<br>
+<strong>Scope</strong>: NAV Online Számla invoice reconciliation + AI chasing workflow for Hungarian SME accounting operations.</p>
+<hr>
+<h2 id="1)-architecture-vision-(togaf-adm-phase-a)" tabindex="-1">1) Architecture Vision (TOGAF ADM Phase A)</h2>
+<h3 id="drivers" tabindex="-1">Drivers</h3>
+<ul>
+<li><strong>Regulatory compliance</strong>: Hungarian NAV Online Számla reporting; September 2025 stricter validations; 8‑year retention.</li>
+<li><strong>Operational risk reduction</strong>: prevent missing invoice PDFs that block bookkeeping and VAT reclaim.</li>
+<li><strong>Security &amp; privacy</strong>: protect NAV technical user credentials, invoices (financial data), and business contact data (GDPR).</li>
+<li><strong>Scale &amp; resilience</strong>: support multiple tenants (SMEs) and increasing invoice volume without system‑wide failures.</li>
+</ul>
+<h3 id="target-outcomes" tabindex="-1">Target Outcomes</h3>
+<ul>
+<li><strong>Detect missing invoices</strong> by reconciling NAV invoice metadata vs received PDFs.</li>
+<li><strong>Automate vendor outreach</strong> using an AI agent with <strong>human approval</strong> where required.</li>
+<li><strong>Maintain tenant isolation</strong> end‑to‑end (data, secrets, processing, audit).</li>
+<li><strong>Enable extensibility</strong>: modular architecture supports future integrations (additional invoice sources, ERP connectors) without breaking core NAV functionality.</li>
+</ul>
+<h3 id="stakeholders-(typical)" tabindex="-1">Stakeholders (Typical)</h3>
+<ul>
+<li><strong>Client</strong>: Accounting Manager, Bookkeeper, Site Manager (PDF uploader)</li>
+<li><strong>SaaS Operator</strong>: Support, Security Officer, Platform Engineer</li>
+<li><strong>External</strong>: NAV API, Email providers, LLM provider (Gemini), Cloud provider</li>
+</ul>
+<hr>
+<h2 id="2)-baseline-vs-target-architecture-(togaf-content-framework)" tabindex="-1">2) Baseline vs Target Architecture (TOGAF Content Framework)</h2>
+<h3 id="baseline-(as-implemented-in-this-repo)" tabindex="-1">Baseline (as implemented in this repo)</h3>
+<p><strong>Core building blocks (SBBs mapped to code):</strong></p>
+<ul>
+<li>NAV API integration: <code>nav_client.py</code> (<code>NavClient</code>, crypto, rate limiting, retries)</li>
+<li>Tenant secrets vault: <code>nav_secret_manager.py</code> (<code>NavSecretManager</code> over GCP Secret Manager)</li>
+<li>Tenant data store: <code>database_manager.py</code> (SQLite, tenant‑scoped tables + audit log)</li>
+<li>Document processing: <code>pdf_scanner.py</code> (folder scan + PDF text/optional OCR extraction)</li>
+<li>AI drafting + sending: <code>invoice_agent.py</code> (Gemini integration, prompt‑injection protection, SMTP sender)</li>
+<li>Human approval workflow: <code>approval_queue.py</code> (SQLite queue + action log)</li>
+<li>AuthN/Z blueprint: <code>auth.py</code> (JWT + RBAC abstractions; not yet wired to a web API)</li>
+</ul>
+<p><strong>Key constraint</strong>: The NAV API client has extensive unit tests; <strong>live NAV test-environment execution remains a separate operational step</strong> (see <code>test_nav_live_api.py</code> + setup docs).</p>
+<h3 id="target-(platform-ready%2C-togaf-phase-d-design)" tabindex="-1">Target (platform-ready, TOGAF Phase D design)</h3>
+<p>Move from “single-process scripts” to <strong>stateless services</strong> coordinated via a <strong>message bus</strong>, with clear separation of concerns:</p>
+<ul>
+<li><strong>API Layer</strong> (tenant + user identity, admin, dashboards)</li>
+<li><strong>Domain Adapters</strong> (NAV connector, Email connector, Document connector)</li>
+<li><strong>Processing Workers</strong> (NAV sync, document extraction, reconciliation, AI draft, approval, send)</li>
+<li><strong>Core Platform Services</strong> (tenant registry, authZ, secrets, audit, observability)</li>
+</ul>
+<h3 id="target-layered-view-(business-%2F-application-%2F-data-%2F-technology)" tabindex="-1">Target layered view (Business / Application / Data / Technology)</h3>
+<div class="mermaid">graph TB
+  B[Business Layer]
+  A[Application Layer]
+  D[Data Layer]
+  T[Technology Layer]
+
+  B --&gt; A
+  A --&gt; D
+  D --&gt; T
+
+  B --&gt; B1[SME Accounting Operations]
+  B --&gt; B2[Missing Invoice Reconciliation]
+  B --&gt; B3[Compliance and Audit Evidence]
+
+  A --&gt; A1[Portal or API]
+  A --&gt; A2[AuthZ and Tenant Context]
+  A --&gt; A3[NAV Connector]
+  A --&gt; A4[Document Processor]
+  A --&gt; A5[Reconciliation Service]
+  A --&gt; A6[AI Draft and Approval]
+  A --&gt; A7[Email Sending]
+
+  D --&gt; D1[Invoice DB]
+  D --&gt; D2[Audit Log]
+  D --&gt; D3[Approval Queue DB]
+  D --&gt; D4[PDF Store]
+  D --&gt; D5[Secrets Vault]
+
+  T --&gt; T1[Python Services or Containers]
+  T --&gt; T2[Queue or Scheduler]
+  T --&gt; T3[Observability: Logs Metrics Traces]
+  T --&gt; T4[Network and IAM]</div><hr>
+<h2 id="3)-solution-concept-diagram-(high-level-context)" tabindex="-1">3) Solution Concept Diagram (high-level context)</h2>
+<div class="mermaid">graph LR
+  U1[Client Accountant] --&gt; UI[Portal or API]
+  U2[Site Manager] --&gt; UI
+  U3[SaaS Admin] --&gt; UI
+
+  UI --&gt; AUTH[Identity and Access]
+  UI --&gt; API[Application API]
+
+  API --&gt; BUS[Event Bus or Queue]
+  BUS --&gt; NAVW[NAV Sync Worker]
+  BUS --&gt; DOCW[Document Processor]
+  BUS --&gt; RECW[Reconciliation Worker]
+  BUS --&gt; AIW[AI Draft Worker]
+  BUS --&gt; APPRW[Approval Worker]
+  BUS --&gt; MAILW[Email Send Worker]
+
+  NAVW --&gt; DB[Tenant Data Store]
+  DOCW --&gt; DB
+  RECW --&gt; DB
+  APPRW --&gt; DB
+  API --&gt; DB
+
+  DOCW --&gt; OBJ[PDF Store]
+
+  NAVW --&gt; NAV[NAV Online Szamla API]
+  AIW --&gt; LLM[Gemini API]
+  MAILW --&gt; EMAIL[Email Provider]
+  NAVW --&gt; SECRETS[Secrets Vault]
+  AIW --&gt; SECRETS
+  MAILW --&gt; SECRETS</div><p><strong>Notes</strong></p>
+<ul>
+<li><strong>Baseline</strong> today implements most boxes as Python modules; <strong>Target</strong> formalizes them as separately deployable services.</li>
+<li>Tenant context is a <strong>first-class request attribute</strong> enforced by authZ and persisted in all data records.</li>
+</ul>
+<hr>
+<h2 id="4)-business-architecture-(togaf-adm-phase-b)" tabindex="-1">4) Business Architecture (TOGAF ADM Phase B)</h2>
+<h3 id="business-capabilities-(capability-map)" tabindex="-1">Business Capabilities (capability map)</h3>
+<div class="mermaid">graph TB
+  C8[Tenant and Access Management]
+  C1[Invoice Visibility: NAV metadata ingest]
+  C2[Document Intake: PDF ingestion and OCR]
+  C3[Reconciliation: match NAV vs PDF]
+  C4[Exception Handling: missing or invalid]
+  C5[Vendor Outreach: email chasing]
+  C6[Human Oversight: approval and escalation]
+  C7[Audit and Compliance: evidence]
+
+  C8 --&gt; C1
+  C8 --&gt; C2
+  C1 --&gt; C3
+  C2 --&gt; C3
+  C3 --&gt; C4
+  C4 --&gt; C5
+  C5 --&gt; C6
+  C6 --&gt; C7</div><h3 id="value-stream-(simplified)" tabindex="-1">Value Stream (simplified)</h3>
+<ol>
+<li><strong>Sync invoices from NAV</strong> → 2. <strong>Ingest PDFs</strong> → 3. <strong>Match &amp; detect gaps</strong> → 4. <strong>Draft outreach</strong> → 5. <strong>Approve (if required)</strong> → 6. <strong>Send</strong> → 7. <strong>Track outcomes &amp; audit</strong></li>
+</ol>
+<hr>
+<h2 id="5)-application-architecture-(togaf-adm-phase-c)" tabindex="-1">5) Application Architecture (TOGAF ADM Phase C)</h2>
+<h3 id="application-building-blocks-(abb-%E2%86%92-sbb-mapping)" tabindex="-1">Application Building Blocks (ABB → SBB mapping)</h3>
+<ul>
+<li><strong>NAV Connector</strong> → <code>NavClient</code> (<code>nav_client.py</code>)</li>
+<li><strong>Tenant Secret Vault</strong> → <code>NavSecretManager</code> (<code>nav_secret_manager.py</code>) backed by GCP Secret Manager</li>
+<li><strong>Invoice State Store</strong> → <code>DatabaseManager</code> (<code>database_manager.py</code>) (SQLite today; Postgres recommended for target)</li>
+<li><strong>Document Extraction</strong> → <code>PDFScanner</code> / <code>PDFContentExtractor</code> (<code>pdf_scanner.py</code>)</li>
+<li><strong>AI Drafting Agent</strong> → <code>InvoiceAgent</code> (<code>invoice_agent.py</code>) with input/output guards</li>
+<li><strong>Human Approval</strong> → <code>ApprovalQueue</code> (<code>approval_queue.py</code>)</li>
+<li><strong>Identity &amp; Authorization</strong> → <code>AuthService/JWTManager</code> (<code>auth.py</code>) (integration layer pending)</li>
+</ul>
+<h3 id="key-workflow-(sequence)%3A-%E2%80%9Cmissing-invoice-%E2%86%92-ai-draft-%E2%86%92-approval-%E2%86%92-send%E2%80%9D" tabindex="-1">Key workflow (sequence): “Missing invoice → AI draft → Approval → Send”</h3>
+<div class="mermaid">sequenceDiagram
+participant REC as "Reconciliation Worker"
+participant DB as "Tenant DB"
+participant AI as "AI Draft Worker (Gemini)"
+participant Q as "Approval Queue"
+participant H as "Human Approver"
+participant M as "Mail Sender"
+participant E as "Email Provider"
+
+REC-&gt;&gt;DB: find invoices with status=MISSING (tenant scoped)
+REC-&gt;&gt;AI: request draft (invoice context, vendor info)
+AI-&gt;&gt;AI: sanitize inputs + construct constrained prompt
+AI-&gt;&gt;AI: validate output (hallucination + blocked content)
+AI-&gt;&gt;Q: enqueue draft for review (tenant scoped)
+H-&gt;&gt;Q: approve / reject / edit
+Q-&gt;&gt;M: emit approved event
+M-&gt;&gt;E: send email (vendor address)
+M-&gt;&gt;DB: mark invoice status EMAILED / ESCALATED + audit log</div><hr>
+<h2 id="6)-data-architecture-(togaf-adm-phase-c)" tabindex="-1">6) Data Architecture (TOGAF ADM Phase C)</h2>
+<h3 id="core-entities-(logical)" tabindex="-1">Core Entities (logical)</h3>
+<div class="mermaid">graph TB
+  TENANT["TENANT<br>tenant_id (PK)"]
+  USER["USER<br>user_id (PK)<br>tenant_id (FK)<br>role<br>email<br>is_active"]
+  INVOICE["INVOICE<br>id (PK)<br>tenant_id (FK)<br>nav_invoice_number<br>vendor_name<br>vendor_tax_number<br>amount<br>currency<br>invoice_date<br>status<br>email_count<br>pdf_path"]
+  APPROVAL["APPROVAL_QUEUE_ITEM<br>id (PK)<br>tenant_id (FK)<br>invoice_number<br>vendor_email<br>status<br>email_subject"]
+  AUDIT["AUDIT_LOG<br>id (PK)<br>tenant_id (FK)<br>action<br>old_status<br>new_status<br>user_id<br>performed_at"]
+
+  TENANT --&gt;|has| USER
+  TENANT --&gt;|owns| INVOICE
+  TENANT --&gt;|records| AUDIT
+  TENANT --&gt;|reviews| APPROVAL
+
+  USER --&gt;|performs| AUDIT
+  INVOICE --&gt;|changes| AUDIT
+  INVOICE --&gt;|relates_to| APPROVAL</div><h3 id="data-classification-(minimum)" tabindex="-1">Data classification (minimum)</h3>
+<ul>
+<li><strong>CRITICAL</strong>: NAV credentials (technical user login/password + signing/exchange keys) → secrets vault only.</li>
+<li><strong>HIGH</strong>: Invoice PDFs, invoice metadata, vendor contacts → encryption at rest + strict tenant isolation.</li>
+<li><strong>MEDIUM</strong>: Operational logs/metrics (must avoid leaking PII/secrets).</li>
+</ul>
+<hr>
+<h2 id="7)-technology-architecture-(togaf-adm-phase-d)" tabindex="-1">7) Technology Architecture (TOGAF ADM Phase D)</h2>
+<h3 id="baseline-deployment-(single-node-reference)" tabindex="-1">Baseline deployment (single-node reference)</h3>
+<ul>
+<li><strong>Runtime</strong>: Python processes (CLI/scheduled scripts)</li>
+<li><strong>Data</strong>: SQLite (<code>data/*.db</code>)</li>
+<li><strong>Documents</strong>: local filesystem (<code>data/pdfs/</code>)</li>
+<li><strong>Secrets</strong>: environment variables <em>or</em> GCP Secret Manager</li>
+<li><strong>Email</strong>: SMTP (Gmail app password) / future: provider API</li>
+</ul>
+<h3 id="target-deployment-(cloud-%26-scale)" tabindex="-1">Target deployment (cloud &amp; scale)</h3>
+<ul>
+<li><strong>Compute</strong>: containerized services (Kubernetes / Cloud Run)</li>
+<li><strong>Data</strong>: PostgreSQL (tenant-row security + indexing), optional read replicas</li>
+<li><strong>Documents</strong>: object storage (GCS/S3) + malware scanning pipeline</li>
+<li><strong>Secrets</strong>: managed secrets vault (GCP Secret Manager / AWS Secrets Manager) with rotation</li>
+<li><strong>Messaging</strong>: Pub/Sub / RabbitMQ / SQS for async agents and horizontal scaling</li>
+<li><strong>Observability</strong>: OpenTelemetry traces + metrics + centralized logging (SIEM export)</li>
+</ul>
+<hr>
+<h2 id="8)-security-architecture-(cross%E2%80%91cutting)" tabindex="-1">8) Security Architecture (cross‑cutting)</h2>
+<h3 id="trust-boundaries-(must-be-explicit)" tabindex="-1">Trust boundaries (must be explicit)</h3>
+<ul>
+<li><strong>Tenant boundary</strong>: every request and record carries <code>tenant_id</code>; enforce in authZ and queries.</li>
+<li><strong>Secret boundary</strong>: credentials never persist outside secrets vault; cache only in memory with TTL.</li>
+<li><strong>LLM boundary</strong>: sanitize all inputs; validate all outputs; block URLs/unknown emails/secret patterns.</li>
+<li><strong>Email boundary</strong>: apply allow‑lists, DMARC/SPF/DKIM checks (ingress) and policy controls (egress).</li>
+</ul>
+<h3 id="access-control-model" tabindex="-1">Access control model</h3>
+<ul>
+<li><strong>RBAC</strong>: Admin / Accountant / Site Manager (existing model in <code>auth.py</code>)</li>
+<li><strong>Tenant authorization</strong>: user ↔ tenant matrix; users only access data within their assigned tenant(s)</li>
+</ul>
+<hr>
+<h2 id="9)-architecture-roadmap-(baseline-%E2%86%92-target)" tabindex="-1">9) Architecture Roadmap (baseline → target)</h2>
+<h3 id="transition-steps-(minimal-risk)" tabindex="-1">Transition steps (minimal risk)</h3>
+<ul>
+<li><strong>T1: Stabilize tenant boundaries</strong>: ensure all non-test modules pass tenant_id consistently; align approval + mail + scanning flows with DB tenant scoping.</li>
+<li><strong>T2: Introduce API façade</strong> (FastAPI): authentication, tenant context propagation, admin operations.</li>
+<li><strong>T3: Event-driven processing</strong>: job queue for NAV sync, scanning, reconciliation, AI drafting, approval, send.</li>
+<li><strong>T4: Replace SQLite where needed</strong>: move to Postgres + object storage; add immutable audit retention.</li>
+</ul>
+<hr>
+<h2 id="10)-what-%22done%22-looks-like-(acceptance-criteria)" tabindex="-1">10) What "done" looks like (acceptance criteria)</h2>
+<ul>
+<li><strong>Functional completeness</strong>: NAV invoice reconciliation features work correctly end‑to‑end (including live NAV test env verification).</li>
+<li><strong>Security</strong>: tenant-scoped access controls; secrets protected; strong audit trail; safe LLM usage.</li>
+<li><strong>Scalability</strong>: workers stateless; queue-backed horizontal scaling.</li>
+<li><strong>Error handling</strong>: component failures degrade locally (retries/circuit breakers) without system-wide outage.</li>
+</ul>
+
+    </div>
+
+
+
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({startOnLoad:true});</script>
+    </body></html>

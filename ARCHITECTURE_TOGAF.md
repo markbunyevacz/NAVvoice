@@ -57,7 +57,9 @@ graph TB
   D[Data Layer]
   T[Technology Layer]
 
-  B --> A --> D --> T
+  B --> A
+  A --> D
+  D --> T
 
   B --> B1[SME Accounting Operations]
   B --> B2[Missing Invoice Reconciliation]
@@ -171,24 +173,23 @@ graph TB
 
 ```mermaid
 sequenceDiagram
-  autonumber
-  participant REC as Reconciliation Worker
-  participant DB as Tenant DB
-  participant AI as AI Draft Worker (Gemini)
-  participant Q as Approval Queue
-  participant H as Human Approver
-  participant M as Mail Sender
-  participant E as Email Provider
+participant REC as "Reconciliation Worker"
+participant DB as "Tenant DB"
+participant AI as "AI Draft Worker (Gemini)"
+participant Q as "Approval Queue"
+participant H as "Human Approver"
+participant M as "Mail Sender"
+participant E as "Email Provider"
 
-  REC->>DB: find invoices with status=MISSING (tenant scoped)
-  REC->>AI: request draft (invoice context, vendor info)
-  AI->>AI: sanitize inputs + construct constrained prompt
-  AI->>AI: validate output (hallucination + blocked content)
-  AI->>Q: enqueue draft for review (tenant scoped)
-  H->>Q: approve / reject / edit
-  Q->>M: emit “approved” event
-  M->>E: send email (vendor address)
-  M->>DB: mark invoice status EMAILED / ESCALATED + audit log
+REC->>DB: find invoices with status=MISSING (tenant scoped)
+REC->>AI: request draft (invoice context, vendor info)
+AI->>AI: sanitize inputs + construct constrained prompt
+AI->>AI: validate output (hallucination + blocked content)
+AI->>Q: enqueue draft for review (tenant scoped)
+H->>Q: approve / reject / edit
+Q->>M: emit approved event
+M->>E: send email (vendor address)
+M->>DB: mark invoice status EMAILED / ESCALATED + audit log
 ```
 
 ---
@@ -198,56 +199,21 @@ sequenceDiagram
 ### Core Entities (logical)
 
 ```mermaid
-erDiagram
-  TENANT ||--o{ USER : has
-  TENANT ||--o{ INVOICE : owns
-  TENANT ||--o{ AUDIT_LOG : records
-  TENANT ||--o{ APPROVAL_QUEUE_ITEM : reviews
+graph TB
+  TENANT["TENANT<br/>tenant_id (PK)"]
+  USER["USER<br/>user_id (PK)<br/>tenant_id (FK)<br/>role<br/>email<br/>is_active"]
+  INVOICE["INVOICE<br/>id (PK)<br/>tenant_id (FK)<br/>nav_invoice_number<br/>vendor_name<br/>vendor_tax_number<br/>amount<br/>currency<br/>invoice_date<br/>status<br/>email_count<br/>pdf_path"]
+  APPROVAL["APPROVAL_QUEUE_ITEM<br/>id (PK)<br/>tenant_id (FK)<br/>invoice_number<br/>vendor_email<br/>status<br/>email_subject"]
+  AUDIT["AUDIT_LOG<br/>id (PK)<br/>tenant_id (FK)<br/>action<br/>old_status<br/>new_status<br/>user_id<br/>performed_at"]
 
-  USER ||--o{ AUDIT_LOG : performs
-  INVOICE ||--o{ AUDIT_LOG : changes
-  INVOICE ||--o{ APPROVAL_QUEUE_ITEM : relates_to
+  TENANT -->|has| USER
+  TENANT -->|owns| INVOICE
+  TENANT -->|records| AUDIT
+  TENANT -->|reviews| APPROVAL
 
-  TENANT {
-    string tenant_id PK
-  }
-  USER {
-    string user_id PK
-    string tenant_id FK
-    string role
-    string email
-    bool is_active
-  }
-  INVOICE {
-    int id PK
-    string tenant_id FK
-    string nav_invoice_number
-    string vendor_name
-    string vendor_tax_number
-    float amount
-    string currency
-    string invoice_date
-    string status
-    int email_count
-    string pdf_path
-  }
-  APPROVAL_QUEUE_ITEM {
-    string id PK
-    string tenant_id FK
-    string invoice_number
-    string vendor_email
-    string status
-    string email_subject
-  }
-  AUDIT_LOG {
-    int id PK
-    string tenant_id FK
-    string action
-    string old_status
-    string new_status
-    string user_id
-    datetime performed_at
-  }
+  USER -->|performs| AUDIT
+  INVOICE -->|changes| AUDIT
+  INVOICE -->|relates_to| APPROVAL
 ```
 
 ### Data classification (minimum)
