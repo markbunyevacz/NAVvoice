@@ -8,6 +8,7 @@ API Documentation: https://onlineszamla.nav.gov.hu/api/files/container/download/
 """
 
 import hashlib
+import os
 import uuid
 import time
 import base64
@@ -153,11 +154,11 @@ class NavClient:
         Args:
             credentials: NAV technical user credentials
             use_test_api: Use NAV test environment (default: False)
-            software_id: Override default software ID
+            software_id: Override default software ID (can also be set via NAV_SOFTWARE_ID env var)
         """
         self.credentials = credentials
         self.base_url = NAV_API_TEST_URL if use_test_api else NAV_API_BASE_URL
-        self.software_id = software_id or self.SOFTWARE_ID
+        self.software_id = software_id or os.environ.get("NAV_SOFTWARE_ID") or self.SOFTWARE_ID
         self.session = requests.Session()
         self.session.headers.update({
             "Content-Type": "application/xml",
@@ -732,11 +733,16 @@ class NavClient:
         """
         root = etree.fromstring(response_xml)
 
-        # Check for funcCode != OK
-        func_code = root.find(".//{%s}funcCode" % NAMESPACES['common'])
+        # Check for funcCode != OK - try all namespaces
+        func_code = None
+        for ns in NAMESPACES.values():
+            func_code = root.find(".//{%s}funcCode" % ns)
+            if func_code is not None:
+                break
+        
         # Also check for funcCode without namespace if not found
         if func_code is None:
-             func_code = root.find(".//funcCode")
+            func_code = root.find(".//funcCode")
 
         if func_code is not None and func_code.text and func_code.text != "OK":
             # errorCode and message are siblings of funcCode (inside result element)

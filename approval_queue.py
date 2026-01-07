@@ -358,7 +358,7 @@ class ApprovalQueue:
                 rows = conn.execute("""
                     SELECT * FROM approval_queue
                     WHERE status = 'approved' AND tenant_id = ?
-                    ORDER BY priority DESC, approved_at ASC
+                    ORDER BY priority DESC, reviewed_at ASC
                     LIMIT ?
                 """, (tenant_id, limit)).fetchall()
             else:

@@ -12,6 +12,7 @@ Requirements:
     pip install pytest pytest-mock
 """
 
+import os
 import pytest
 from datetime import datetime
 from typing import Dict, List, Any
@@ -227,8 +228,17 @@ class TestNAVTestAPIIntegration:
     """
 
     @pytest.mark.integration
-    @pytest.mark.skip(reason="Requires NAV test credentials and --run-integration flag")
-    def test_submit_invoice_with_vat_error_435(self, nav_client):
+    @pytest.mark.skipif(
+        not all([
+            os.environ.get("NAV_TEST_LOGIN"),
+            os.environ.get("NAV_TEST_PASSWORD"),
+            os.environ.get("NAV_TEST_SIGNATURE_KEY"),
+            os.environ.get("NAV_TEST_REPLACEMENT_KEY"),
+            os.environ.get("NAV_TEST_TAX_NUMBER"),
+        ]),
+        reason="Requires NAV_TEST_* environment variables"
+    )
+    def test_submit_invoice_with_vat_error_435(self):
         """
         Submit invoice with intentional VAT rate mismatch to NAV test API.
 
@@ -238,7 +248,17 @@ class TestNAVTestAPIIntegration:
         pytest.skip("Requires complete invoice XML fixture")
 
     @pytest.mark.integration
-    def test_query_invoice_handles_validation_errors(self, nav_client):
+    @pytest.mark.skipif(
+        not all([
+            os.environ.get("NAV_TEST_LOGIN"),
+            os.environ.get("NAV_TEST_PASSWORD"),
+            os.environ.get("NAV_TEST_SIGNATURE_KEY"),
+            os.environ.get("NAV_TEST_REPLACEMENT_KEY"),
+            os.environ.get("NAV_TEST_TAX_NUMBER"),
+        ]),
+        reason="Requires NAV_TEST_* environment variables"
+    )
+    def test_query_invoice_handles_validation_errors(self):
         """
         Test that client properly handles validation errors from NAV.
 
