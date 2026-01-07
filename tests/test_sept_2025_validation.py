@@ -67,13 +67,20 @@ class TestSept2025Validation:
         # This test validates that the error code is recognized
         assert NavErrorCode.VAT_RATE_MISMATCH.value == "435"
 
-        # Simulate NAV response with warning 435
+        # Simulate NAV response with warning 435 using proper namespace structure
         mock_response = b"""<?xml version="1.0" encoding="UTF-8"?>
-        <GeneralErrorResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
-            <funcCode>ERROR</funcCode>
-            <errorCode>435</errorCode>
-            <message>VAT rate does not match tax number status</message>
-        </GeneralErrorResponse>"""
+        <QueryInvoiceDataResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api"
+                                  xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common">
+            <common:header>
+                <common:requestId>TEST123</common:requestId>
+                <common:timestamp>2024-01-01T00:00:00Z</common:timestamp>
+            </common:header>
+            <common:result>
+                <common:funcCode>ERROR</common:funcCode>
+                <common:errorCode>435</common:errorCode>
+                <common:message>VAT rate does not match tax number status</common:message>
+            </common:result>
+        </QueryInvoiceDataResponse>"""
 
         with patch.object(nav_client.session, 'post') as mock_post:
             mock_post.return_value = Mock(
@@ -100,11 +107,18 @@ class TestSept2025Validation:
         assert NavErrorCode.VAT_SUMMARY_MISMATCH.value == "734"
 
         mock_response = b"""<?xml version="1.0" encoding="UTF-8"?>
-        <GeneralErrorResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
-            <funcCode>ERROR</funcCode>
-            <errorCode>734</errorCode>
-            <message>VAT summary does not match line items</message>
-        </GeneralErrorResponse>"""
+        <QueryInvoiceDataResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api"
+                                  xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common">
+            <common:header>
+                <common:requestId>TEST123</common:requestId>
+                <common:timestamp>2024-01-01T00:00:00Z</common:timestamp>
+            </common:header>
+            <common:result>
+                <common:funcCode>ERROR</common:funcCode>
+                <common:errorCode>734</common:errorCode>
+                <common:message>VAT summary does not match line items</common:message>
+            </common:result>
+        </QueryInvoiceDataResponse>"""
 
         with patch.object(nav_client.session, 'post') as mock_post:
             mock_post.return_value = Mock(
@@ -129,11 +143,18 @@ class TestSept2025Validation:
         assert NavErrorCode.VAT_LINE_ITEM_ERROR.value == "1311"
 
         mock_response = b"""<?xml version="1.0" encoding="UTF-8"?>
-        <GeneralErrorResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
-            <funcCode>ERROR</funcCode>
-            <errorCode>1311</errorCode>
-            <message>Line item VAT calculation error</message>
-        </GeneralErrorResponse>"""
+        <QueryInvoiceDataResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api"
+                                  xmlns:common="http://schemas.nav.gov.hu/NTCA/1.0/common">
+            <common:header>
+                <common:requestId>TEST123</common:requestId>
+                <common:timestamp>2024-01-01T00:00:00Z</common:timestamp>
+            </common:header>
+            <common:result>
+                <common:funcCode>ERROR</common:funcCode>
+                <common:errorCode>1311</common:errorCode>
+                <common:message>Line item VAT calculation error</common:message>
+            </common:result>
+        </QueryInvoiceDataResponse>"""
 
         with patch.object(nav_client.session, 'post') as mock_post:
             mock_post.return_value = Mock(

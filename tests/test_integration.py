@@ -101,9 +101,10 @@ class TestJWTAuthentication:
 
     @pytest.fixture
     def auth(self, tmp_path):
-        """Create auth service with temp database."""
-        db_path = tmp_path / "test_auth.db"
-        return AuthService(str(db_path), jwt_secret="test-secret-key-12345")
+        """Create auth service."""
+        from auth import AuthConfig
+        config = AuthConfig(secret_key="test-secret-key-12345")
+        return AuthService(config)
 
     def test_register_and_login(self, auth):
         """Test user registration and login flow."""
@@ -119,9 +120,9 @@ class TestJWTAuthentication:
         assert user.email == "test@example.com"
         assert user.role == UserRole.ACCOUNTANT
 
-        # Login
+        # Login - returns dict with tokens on success, None on failure
         result = auth.login("test@example.com", "SecurePass123!")
-        assert result["success"] is True
+        assert result is not None
         assert "access_token" in result
         assert "refresh_token" in result
 
@@ -130,7 +131,7 @@ class TestJWTAuthentication:
         auth.register("user@test.com", "CorrectPass123!", UserRole.ADMIN, "t1", "User")
 
         result = auth.login("user@test.com", "WrongPassword!")
-        assert result["success"] is False
+        assert result is None
 
     def test_token_validation(self, auth):
         """Test JWT token validation."""
@@ -153,7 +154,7 @@ class TestJWTAuthentication:
         # Site manager cannot approve emails
         valid, user, error = auth.validate_request(
             f"Bearer {tokens['access_token']}",
-            [Permission.APPROVE_EMAIL]
+            [Permission.APPROVE_EMAILS]
         )
         assert valid is False
 
@@ -165,7 +166,9 @@ class TestApprovalQueue:
     def queue(self, tmp_path):
         """Create approval queue with temp database."""
         db_path = tmp_path / "test_queue.db"
-        return ApprovalQueue(str(db_path))
+        q = ApprovalQueue(str(db_path))
+        q.initialize()
+        return q
 
     def test_add_and_approve(self, queue):
         """Test adding email to queue and approving."""
@@ -271,11 +274,16 @@ class TestFullWorkflow:
     @pytest.fixture
     def setup_all(self, tmp_path):
         """Set up all components."""
+        from auth import AuthConfig
+        
         db = DatabaseManager(str(tmp_path / "invoices.db"))
         db.initialize()
 
-        auth = AuthService(str(tmp_path / "auth.db"), jwt_secret="test-secret")
+        config = AuthConfig(secret_key="test-secret")
+        auth = AuthService(config)
+        
         queue = ApprovalQueue(str(tmp_path / "queue.db"))
+        queue.initialize()
 
         return {"db": db, "auth": auth, "queue": queue, "tmp_path": tmp_path}
 
@@ -289,7 +297,7 @@ class TestFullWorkflow:
         # 1. Register and authenticate user
         auth.register("admin@test.com", "Admin123!@#", UserRole.ADMIN, tenant_id, "Admin")
         tokens = auth.login("admin@test.com", "Admin123!@#")
-        assert tokens["success"]
+        assert tokens is not None
 
         # 2. Import invoices from NAV
         nav_invoices = [

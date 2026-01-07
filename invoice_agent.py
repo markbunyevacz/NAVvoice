@@ -11,7 +11,7 @@ Security Features:
 - Audit logging
 
 Requirements:
-    pip install google-generativeai
+    pip install google-genai
 """
 
 import os
@@ -24,10 +24,12 @@ from dataclasses import dataclass
 from enum import Enum
 
 try:
-    import google.generativeai as genai
+    from google import genai
+    GENAI_AVAILABLE = True
 except ImportError:
     genai = None
-    logging.warning("google-generativeai not installed. Run: pip install google-generativeai")
+    GENAI_AVAILABLE = False
+    logging.warning("google-genai not installed. Run: pip install google-genai")
 
 logger = logging.getLogger(__name__)
 
@@ -340,22 +342,15 @@ Tisztelt Partnerünk!
         Args:
             config: Agent configuration with API key
         """
-        if genai is None:
-            raise ImportError("google-generativeai not installed")
+        if not GENAI_AVAILABLE:
+            raise ImportError("google-genai not installed. Run: pip install google-genai")
 
         self.config = config
         self.sanitizer = InputSanitizer()
         self.validator = OutputValidator()
 
-        # Configure Gemini
-        genai.configure(api_key=config.api_key)
-        self.model = genai.GenerativeModel(
-            model_name=config.model_name,
-            generation_config={
-                "temperature": config.temperature,
-                "max_output_tokens": config.max_output_tokens,
-            }
-        )
+        # Create Gemini client (new google-genai SDK)
+        self.client = genai.Client(api_key=config.api_key)
 
         logger.info(f"InvoiceAgent initialized with model: {config.model_name}")
 
@@ -416,9 +411,16 @@ Tisztelt Partnerünk!
             safe_context = self.sanitizer.sanitize(additional_context, "notes")
             system_prompt += f"\n\nTovábbi információ: {safe_context}"
 
-        # Step 3: Generate with Gemini
+        # Step 3: Generate with Gemini (new google-genai SDK)
         try:
-            response = self.model.generate_content(system_prompt)
+            response = self.client.models.generate_content(
+                model=self.config.model_name,
+                contents=system_prompt,
+                config={
+                    "temperature": self.config.temperature,
+                    "max_output_tokens": self.config.max_output_tokens,
+                }
+            )
             raw_response = response.text
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
