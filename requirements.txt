@@ -31,8 +31,8 @@ Pillow>=10.0.0,<11.0.0
 # AI & EMAIL GENERATION
 # ============================================================================
 
-# Google Gemini AI for email generation
-google-generativeai>=0.3.0,<1.0.0
+# Google Gemini AI for email generation (new unified SDK)
+google-genai>=1.0.0
 
 # ============================================================================
 # AUTHENTICATION & SECURITY

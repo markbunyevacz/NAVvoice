@@ -460,11 +460,14 @@ class TestInvoiceAgent:
 
     @pytest.fixture
     def mock_genai(self):
-        """Mock google.generativeai module."""
-        with patch('invoice_agent.genai') as mock:
-            mock_model = MagicMock()
-            mock.GenerativeModel.return_value = mock_model
-            yield mock, mock_model
+        """Mock google.genai module (new SDK)."""
+        with patch('invoice_agent.GENAI_AVAILABLE', True), \
+             patch('invoice_agent.genai') as mock:
+            mock_client = MagicMock()
+            mock_models = MagicMock()
+            mock_client.models = mock_models
+            mock.Client.return_value = mock_client
+            yield mock, mock_models
 
     @pytest.fixture
     def agent_config(self):
@@ -480,20 +483,19 @@ class TestInvoiceAgent:
 
     def test_agent_initialization(self, mock_genai, agent_config):
         """Agent should initialize with correct configuration."""
-        mock, mock_model = mock_genai
+        mock, mock_models = mock_genai
         agent = InvoiceAgent(agent_config)
         
-        mock.configure.assert_called_once_with(api_key="test-api-key")
-        mock.GenerativeModel.assert_called_once()
+        mock.Client.assert_called_once_with(api_key="test-api-key")
 
     def test_generate_chasing_email_success(self, mock_genai, agent_config):
         """Should generate valid chasing email."""
-        mock, mock_model = mock_genai
+        mock, mock_models = mock_genai
         
         # Mock successful AI response
         mock_response = MagicMock()
         mock_response.text = "Tisztelt Partnerünk! Kérjük küldjék el az INV-2024-001 számú számlát. Az összeg: 125 000 Ft. Köszönjük együttműködésüket."
-        mock_model.generate_content.return_value = mock_response
+        mock_models.generate_content.return_value = mock_response
         
         agent = InvoiceAgent(agent_config)
         result = agent.generate_chasing_email(
@@ -512,11 +514,11 @@ class TestInvoiceAgent:
 
     def test_generate_chasing_email_with_different_tones(self, mock_genai, agent_config):
         """Should use different prompts for different tones."""
-        mock, mock_model = mock_genai
+        mock, mock_models = mock_genai
         
         mock_response = MagicMock()
         mock_response.text = "Tisztelt Partnerünk! INV-001 számla. 100 000 Ft. Köszönjük."
-        mock_model.generate_content.return_value = mock_response
+        mock_models.generate_content.return_value = mock_response
         
         agent = InvoiceAgent(agent_config)
         
@@ -532,7 +534,7 @@ class TestInvoiceAgent:
 
     def test_generate_chasing_email_sanitization_failure(self, mock_genai, agent_config):
         """Should fail when input sanitization fails."""
-        mock, mock_model = mock_genai
+        mock, mock_models = mock_genai
         agent = InvoiceAgent(agent_config)
         
         result = agent.generate_chasing_email(
@@ -547,8 +549,8 @@ class TestInvoiceAgent:
 
     def test_generate_chasing_email_api_error(self, mock_genai, agent_config):
         """Should handle API errors gracefully."""
-        mock, mock_model = mock_genai
-        mock_model.generate_content.side_effect = Exception("API Error")
+        mock, mock_models = mock_genai
+        mock_models.generate_content.side_effect = Exception("API Error")
         
         agent = InvoiceAgent(agent_config)
         result = agent.generate_chasing_email(
@@ -563,12 +565,12 @@ class TestInvoiceAgent:
 
     def test_generate_chasing_email_validation_failure(self, mock_genai, agent_config):
         """Should fail when output validation fails."""
-        mock, mock_model = mock_genai
+        mock, mock_models = mock_genai
         
         # Mock response with blocked content
         mock_response = MagicMock()
         mock_response.text = "Click here https://malicious.com to pay INV-001. 100 000 Ft."
-        mock_model.generate_content.return_value = mock_response
+        mock_models.generate_content.return_value = mock_response
         
         agent = InvoiceAgent(agent_config)
         result = agent.generate_chasing_email(
@@ -583,11 +585,11 @@ class TestInvoiceAgent:
 
     def test_generate_chasing_email_with_additional_context(self, mock_genai, agent_config):
         """Should include additional context in prompt."""
-        mock, mock_model = mock_genai
+        mock, mock_models = mock_genai
         
         mock_response = MagicMock()
         mock_response.text = "Tisztelt Partnerünk! INV-001 számla. 100 000 Ft. Köszönjük."
-        mock_model.generate_content.return_value = mock_response
+        mock_models.generate_content.return_value = mock_response
         
         agent = InvoiceAgent(agent_config)
         result = agent.generate_chasing_email(
@@ -599,16 +601,16 @@ class TestInvoiceAgent:
         )
         
         # Verify generate_content was called with context
-        call_args = mock_model.generate_content.call_args
-        assert "urgent" in call_args[0][0].lower() or result["success"]
+        call_args = mock_models.generate_content.call_args
+        assert "urgent" in str(call_args).lower() or result["success"]
 
     def test_generate_batch_emails(self, mock_genai, agent_config):
         """Should generate emails for multiple invoices."""
-        mock, mock_model = mock_genai
+        mock, mock_models = mock_genai
         
         mock_response = MagicMock()
         mock_response.text = "Tisztelt Partnerünk! INV-001 számla. 100 000 Ft. Köszönjük."
-        mock_model.generate_content.return_value = mock_response
+        mock_models.generate_content.return_value = mock_response
         
         agent = InvoiceAgent(agent_config)
         invoices = [
