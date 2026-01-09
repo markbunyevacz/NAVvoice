@@ -1,0 +1,18 @@
+Endpoint,Method,Description,Authentication,Rate Limit,Required Scopes
+/api/v1/auth/voice-enroll,POST,Enroll user voice biometric profile,Ügyfélkapu + MFA,5/hour,profile:write
+/api/v1/auth/voice-verify,POST,Verify user identity via voice,Voice biometric,20/hour,auth:verify
+/api/v1/auth/token,POST,Exchange credentials for JWT token,OAuth 2.0,10/minute,N/A
+/api/v1/auth/refresh,POST,Refresh expired access token,Refresh token,5/minute,N/A
+/api/v1/voice/query,POST,Process voice query for NAV services,JWT + Voice verify,100/minute,nav:query
+/api/v1/invoice/submit,POST,Submit invoice via voice command,JWT + Voice verify,50/hour,nav:invoice:write
+/api/v1/invoice/query,GET,Query invoice status,JWT,200/minute,nav:invoice:read
+/api/v1/vat/status,GET,Check VAT return status,JWT,100/minute,nav:vat:read
+/api/v1/vat/prefilled,GET,Retrieve eVAT pre-filled data,JWT,50/minute,nav:vat:read
+/api/v1/employment/status,GET,Check employment tax status,JWT,100/minute,nav:employment:read
+/api/v1/user/profile,GET,Retrieve user profile and preferences,JWT,50/minute,profile:read
+/api/v1/user/settings,PUT,Update user voice and notification settings,JWT,20/minute,profile:write
+/api/v1/audit/logs,GET,Retrieve user's audit log (GDPR access),JWT + MFA,10/hour,audit:read
+/api/v1/integration/nav-online,POST,Sync with NAV Online Számla 3.2,Service account,1000/hour,integration:nav
+/api/v1/integration/ugyfelkapu,POST,Authenticate via Ügyfélkapu gateway,SAML 2.0,20/minute,auth:ugyfelkapu
+/api/v1/health,GET,System health check endpoint,None,Unlimited,N/A
+/api/v1/metrics,GET,Prometheus metrics endpoint,Internal only,Unlimited,monitoring:read

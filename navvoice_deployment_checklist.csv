@@ -1,0 +1,23 @@
+Phase,Task,Responsible,Dependencies,Completion Criteria
+Pre-Deployment,Complete security architecture review,Security Team,Architecture docs,Sign-off from CISO
+Pre-Deployment,Conduct penetration testing,External Auditor,Security review,No critical vulnerabilities
+Pre-Deployment,Perform DPIA (Data Protection Impact Assessment),DPO,System design,NAIH notification if required
+Pre-Deployment,Set up HSM for key management,DevOps,Cloud infrastructure,Keys generated and backed up
+Pre-Deployment,Configure WAF rules,Security Team,CDN setup,OWASP Top 10 protection active
+Pre-Deployment,Implement rate limiting,Backend Team,API Gateway,Load testing validates limits
+Pre-Deployment,Configure audit logging to SIEM,DevOps,SIEM platform,All events captured
+Pre-Deployment,Test Ügyfélkapu integration,Integration Team,Test credentials from NAV,Successful authentication flow
+Pre-Deployment,Validate NAV Online Számla connection,Backend Team,NAV test environment,Invoice submission successful
+Deployment,Deploy to staging environment,DevOps,All pre-deployment tasks,Staging functional
+Deployment,Run automated security tests,QA Team,Staging deployment,All tests passing
+Deployment,Conduct user acceptance testing (UAT),Product Team,Security tests passed,User sign-off
+Deployment,Blue-green deployment to production,DevOps,UAT completion,Zero-downtime deployment
+Deployment,Enable monitoring and alerting,DevOps,Production deployment,Alerts configured in PagerDuty
+Post-Deployment,Monitor for 48 hours,DevOps + Security,Production deployment,No critical incidents
+Post-Deployment,Conduct post-deployment security review,Security Team,48-hour monitoring,Security posture validated
+Post-Deployment,User training and documentation,Product Team,Production stable,Training materials published
+Post-Deployment,Notify NAIH of data processing activities,DPO,Production launch,Compliance filing complete
+Ongoing,Weekly vulnerability scans,Security Team,Production,Scans completed and reviewed
+Ongoing,Monthly compliance audits,DPO,Production,Audit reports generated
+Ongoing,Quarterly penetration testing,External Auditor,Production,Vulnerabilities remediated
+Ongoing,Annual DPIA review,DPO,Production,Updated DPIA on file
