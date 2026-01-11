@@ -1,0 +1,31 @@
+sequenceDiagram
+    participant User
+    participant API
+    participant Auth
+    participant Queue
+    participant Mailer
+    participant Vendor
+
+    User->>API: Login(email, password)
+    API->>Auth: Authenticate
+    Auth-->>API: JWT Token
+    API-->>User: Return Token
+
+    User->>API: Get Pending Emails
+    API->>Queue: Query Pending Items
+    Queue-->>API: List of Emails
+
+    alt Approve Email
+        User->>API: Approve(item_id)
+        API->>Queue: Update Status -> APPROVED
+        Queue->>Mailer: Send Email
+        Mailer->>Vendor: Send SMTP Email
+        Mailer-->>Queue: Sent Success
+        Queue->>Queue: Update Status -> SENT
+    else Reject Email
+        User->>API: Reject(item_id, reason)
+        API->>Queue: Update Status -> REJECTED
+    else Edit Email
+        User->>API: Edit(item_id, new_content)
+        API->>Queue: Update Content & Status -> APPROVED
+    end

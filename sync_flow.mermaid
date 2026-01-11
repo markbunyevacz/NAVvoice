@@ -1,0 +1,29 @@
+sequenceDiagram
+    participant Scheduler
+    participant Orch as Orchestrator
+    participant NAV as NAV Client
+    participant DB as Database
+    participant Agent as AI Agent
+    participant Queue as Approval Queue
+
+    Scheduler->>Orch: Trigger Daily Sync
+    Orch->>NAV: Query Incoming Invoices (Last 30 days)
+    NAV->>NAV: Authenticate (Token Exchange)
+    NAV-->>Orch: Return Invoice List
+    
+    Orch->>DB: Upsert Invoices
+    DB-->>Orch: Result (Inserted/Skipped)
+    
+    Orch->>DB: Get Missing Invoices (>5 days old)
+    DB-->>Orch: List of Missing Invoices
+    
+    loop For Each Missing Invoice
+        Orch->>Agent: Generate Reminder Email
+        Agent->>Agent: Sanitize Inputs
+        Agent->>Agent: Generate Content (Gemini)
+        Agent->>Agent: Validate Output
+        Agent-->>Orch: Email Content
+        
+        Orch->>Queue: Add to Approval Queue
+        Queue-->>Orch: Queue Item ID
+    end
