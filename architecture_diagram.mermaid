@@ -1,0 +1,48 @@
+graph TD
+    User((User))
+    Admin((Admin))
+    Vendor((Vendor))
+
+    subgraph "NAV Invoice Reconciliation System"
+        API[API Gateway]
+        Auth[Auth Service]
+        Orch[Orchestrator]
+        
+        subgraph "Core Services"
+            NAVClient[NAV Client]
+            Agent[Invoice Agent]
+            Queue[Approval Queue]
+            DB[Database Manager]
+            Secret[Secret Manager]
+        end
+        
+        subgraph "External Services"
+            Gemini[Google Gemini AI]
+            Gmail[Gmail SMTP]
+            NAV[NAV Online Számla]
+            SecretMgr[GCP Secret Manager]
+        end
+    end
+
+    User -->|Login/Upload| API
+    Admin -->|Manage Users/Keys| API
+    
+    API --> Auth
+    API --> Orch
+    
+    Orch --> NAVClient
+    Orch --> Agent
+    Orch --> Queue
+    Orch --> DB
+    
+    NAVClient -->|Fetch Invoices| NAV
+    NAVClient -->|Get Creds| Secret
+    Secret -->|Retrieve| SecretMgr
+    
+    Agent -->|Generate Email| Gemini
+    Agent -->|Validate| DB
+    
+    Queue -->|Store| DB
+    Queue -->|Send| Gmail
+    
+    Gmail -->|Email| Vendor
