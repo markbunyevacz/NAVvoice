@@ -45,9 +45,7 @@ class SecretManagerConfig:
     cache_ttl_seconds: int = 300  # 5 minutes cache
     enable_caching: bool = True
     secret_prefix: str = "nav-credentials"
-    
-    # Multi-tenancy: each client gets isolated secrets
-    # Format: projects/{project}/secrets/{prefix}-{tenant_id}/versions/latest
+    software_id: Optional[str] = None
     
     def get_secret_name(self, tenant_id: str) -> str:
         """Generate full secret resource name for a tenant."""
@@ -354,10 +352,11 @@ class NavSecretManager:
         from nav_client import NavClient
 
         credentials = self.get_credentials(tenant_id)
+        resolved_software_id = software_id or self.config.software_id
         return NavClient(
             credentials=credentials,
             use_test_api=use_test_api,
-            software_id=software_id
+            software_id=resolved_software_id
         )
 
     def list_tenants(self) -> list:

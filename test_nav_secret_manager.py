@@ -75,6 +75,7 @@ class TestSecretManagerConfig:
         assert config.cache_ttl_seconds == 300
         assert config.enable_caching is True
         assert config.secret_prefix == "nav-credentials"
+        assert config.software_id is None
 
     def test_custom_values(self):
         """Should accept custom values."""
@@ -538,6 +539,40 @@ class TestNavSecretManager:
             
             call_kwargs = mock_nav_client.call_args[1]
             assert call_kwargs['software_id'] == "CUSTOM-SOFTWARE-ID"
+
+    def test_create_nav_client_uses_config_software_id(self, mock_secret_manager_client, credentials_json):
+        """Should resolve software_id from SecretManagerConfig when not passed explicitly."""
+        from nav_secret_manager import SecretManagerConfig, NavSecretManager
+
+        config = SecretManagerConfig(project_id="test-project", software_id="HUCONFIG-0001")
+        secret_manager = NavSecretManager(config)
+
+        mock_response = MagicMock()
+        mock_response.payload.data = credentials_json.encode('UTF-8')
+        mock_secret_manager_client.access_secret_version.return_value = mock_response
+
+        with patch('nav_client.NavClient') as mock_nav_client:
+            secret_manager.create_nav_client("tenant-001")
+
+            call_kwargs = mock_nav_client.call_args[1]
+            assert call_kwargs['software_id'] == "HUCONFIG-0001"
+
+    def test_create_nav_client_explicit_overrides_config(self, mock_secret_manager_client, credentials_json):
+        """Explicit software_id param should override config value."""
+        from nav_secret_manager import SecretManagerConfig, NavSecretManager
+
+        config = SecretManagerConfig(project_id="test-project", software_id="HUCONFIG-0001")
+        secret_manager = NavSecretManager(config)
+
+        mock_response = MagicMock()
+        mock_response.payload.data = credentials_json.encode('UTF-8')
+        mock_secret_manager_client.access_secret_version.return_value = mock_response
+
+        with patch('nav_client.NavClient') as mock_nav_client:
+            secret_manager.create_nav_client("tenant-001", software_id="HUOVERRIDE-0001")
+
+            call_kwargs = mock_nav_client.call_args[1]
+            assert call_kwargs['software_id'] == "HUOVERRIDE-0001"
 
     def test_list_tenants(self, secret_manager, mock_secret_manager_client):
         """Should list all tenants with stored credentials."""

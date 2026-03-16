@@ -13,6 +13,7 @@ Phase 2: APScheduler or Celery Beat wrapper.
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,7 @@ from database_manager import DatabaseManager
 from pdf_scanner import PDFScanner
 from invoice_agent import InvoiceAgent, AgentConfig, VendorDirectory, EmailTone
 from approval_queue import ApprovalQueue
+from upload_links import generate_upload_link
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +237,18 @@ def run_reconciliation(
                 f"Üdvözlettel,\nPénzügyi Osztály"
             )
             email_tone = "polite"
+
+        # Append tenant-scoped upload link so the vendor can reply with the PDF
+        upload_secret = os.getenv("UPLOAD_LINK_SECRET", "")
+        app_base_url = os.getenv("APP_BASE_URL", "https://app.navvoice.hu")
+        if upload_secret:
+            link = generate_upload_link(
+                base_url=app_base_url,
+                tenant_id=tenant_id,
+                invoice_number=invoice_number,
+                secret=upload_secret,
+            )
+            email_body += f"\n\nSzámla feltöltése az alábbi linken: {link}"
 
         # Vendor email lookup
         vendor_email = vendor_dir.get_email(vendor_name, tax_number=vendor_tax or None)

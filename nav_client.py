@@ -7,6 +7,7 @@ with proper XML signature handling per NAV specifications.
 API Documentation: https://onlineszamla.nav.gov.hu/api/files/container/download/Online%20Szamla_INTERFESZ_specifikacio_3.0_HU.pdf
 """
 
+import os
 import hashlib
 import uuid
 import time
@@ -181,7 +182,6 @@ class NavClient:
         )
     """
 
-    SOFTWARE_ID = "HU12345678-1234"  # Replace with registered software ID
     SOFTWARE_NAME = "NAV Invoice Reconciliation"
     SOFTWARE_VERSION = "1.0.0"
     SOFTWARE_DEV_NAME = "Your Company Name"
@@ -203,11 +203,16 @@ class NavClient:
         Args:
             credentials: NAV technical user credentials
             use_test_api: Use NAV test environment (default: False)
-            software_id: Override default software ID
+            software_id: Software ID from NAV registration, or reads NAV_SOFTWARE_ID env var
         """
         self.credentials = credentials
         self.base_url = NAV_API_TEST_URL if use_test_api else NAV_API_BASE_URL
-        self.software_id = software_id or self.SOFTWARE_ID
+        self.software_id = software_id or os.getenv("NAV_SOFTWARE_ID")
+        if not self.software_id:
+            raise ValueError(
+                "NAV_SOFTWARE_ID not configured. "
+                "Pass software_id parameter or set NAV_SOFTWARE_ID environment variable."
+            )
         self.session = requests.Session()
         self.session.headers.update({
             "Content-Type": "application/xml",
@@ -1673,7 +1678,7 @@ if __name__ == "__main__":
     client = NavClient(
         credentials=credentials,
         use_test_api=True,  # Set to False for production
-        software_id="HU12345678-0001"  # Your registered software ID
+        software_id=os.getenv("NAV_SOFTWARE_ID", "HU12345678-0001")
     )
 
     try:

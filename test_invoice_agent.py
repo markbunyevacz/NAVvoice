@@ -763,7 +763,7 @@ class TestMailer:
         for email in invalid_emails:
             assert mailer._validate_email(email) is False
 
-    @patch('invoice_agent.smtplib.SMTP')
+    @patch('email_backend.smtplib.SMTP')
     def test_send_email_smtp_success(self, mock_smtp, mailer_config):
         """Should send email via SMTP successfully."""
         mailer_config.dry_run = False
@@ -783,7 +783,7 @@ class TestMailer:
         mock_server.login.assert_called_once()
         mock_server.sendmail.assert_called_once()
 
-    @patch('invoice_agent.smtplib.SMTP')
+    @patch('email_backend.smtplib.SMTP')
     def test_send_email_smtp_auth_error(self, mock_smtp, mailer_config):
         """Should handle SMTP authentication errors."""
         import smtplib
@@ -803,7 +803,7 @@ class TestMailer:
         assert result["success"] is False
         assert "Authentication failed" in result["error"]
 
-    @patch('invoice_agent.smtplib.SMTP')
+    @patch('email_backend.smtplib.SMTP')
     def test_send_email_with_cc(self, mock_smtp, mailer_config):
         """Should send email with CC recipients."""
         mailer_config.dry_run = False
@@ -820,7 +820,6 @@ class TestMailer:
         )
         
         assert result["success"] is True
-        # Verify sendmail was called with all recipients
         call_args = mock_server.sendmail.call_args
         recipients = call_args[0][1]
         assert "recipient@example.com" in recipients

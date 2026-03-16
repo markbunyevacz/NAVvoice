@@ -599,51 +599,59 @@ class VendorDirectory:
 
 
 # =============================================================================
-# EMAIL MAILER (Gmail SMTP)
+# EMAIL MAILER (Strategy Pattern -- delegates to EmailBackend)
 # =============================================================================
 
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from email_backend import (
+    EmailBackend,
+    EmailBackendConfig,
+    GmailSMTPBackend,
+    GmailSMTPConfig,
+    SendGridBackend,
+    SendGridConfig,
+    AmazonSESBackend,
+    AmazonSESConfig,
+    create_email_backend,
+)
 
-
-@dataclass
-class MailerConfig:
-    """Gmail SMTP configuration."""
-    smtp_server: str = "smtp.gmail.com"
-    smtp_port: int = 587
-    sender_email: str = ""
-    sender_password: str = ""  # App password for Gmail
-    sender_name: str = "NAV Invoice System"
-    use_tls: bool = True
-    dry_run: bool = False  # If True, don't actually send
+# Backward-compatible alias so existing code using MailerConfig keeps working.
+MailerConfig = GmailSMTPConfig
 
 
 class Mailer:
     """
-    Email sender using Gmail SMTP.
+    Email sender with pluggable backend (Strategy Pattern).
 
-    Requires Gmail App Password (not regular password).
-    Enable 2FA on Gmail, then create App Password at:
-    https://myaccount.google.com/apppasswords
+    MVP uses GmailSMTPBackend; enterprise tenants can supply
+    SendGrid / SES credentials and the Mailer will use the
+    corresponding backend.
 
-    Usage:
+    Usage (new style):
+        backend = GmailSMTPBackend(GmailSMTPConfig(...))
+        mailer = Mailer(backend)
+
+    Usage (backward-compatible):
+        config = MailerConfig(sender_email="x@gmail.com",
+                              sender_password="app-pw", dry_run=True)
         mailer = Mailer(config)
-        success = mailer.send_email(
-            to_email="vendor@example.com",
-            subject="Missing Invoice",
-            body="Please send invoice..."
-        )
     """
 
-    def __init__(self, config: MailerConfig):
+    def __init__(self, backend_or_config):
         """
-        Initialize mailer.
-
         Args:
-            config: SMTP configuration
+            backend_or_config: An ``EmailBackend`` instance **or** a
+                ``GmailSMTPConfig`` / legacy ``MailerConfig`` for
+                backward compatibility.
         """
-        self.config = config
+        if isinstance(backend_or_config, EmailBackend):
+            self.backend = backend_or_config
+        elif isinstance(backend_or_config, GmailSMTPConfig):
+            self.backend = GmailSMTPBackend(backend_or_config)
+        else:
+            raise TypeError(
+                f"Expected EmailBackend or GmailSMTPConfig, "
+                f"got {type(backend_or_config).__name__}"
+            )
         self.vendor_directory = VendorDirectory()
         self._sent_count = 0
         self._failed_count = 0
@@ -657,95 +665,25 @@ class Mailer:
         reply_to: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Send an email via Gmail SMTP.
-
-        Args:
-            to_email: Recipient email address
-            subject: Email subject
-            body: Email body (plain text)
-            cc: Optional CC recipients
-            reply_to: Optional reply-to address
+        Validate the recipient and delegate to the configured backend.
 
         Returns:
-            Dict with success status and details
+            Dict with success status and details.
         """
-        # Validate email format
         if not self._validate_email(to_email):
             return {
                 "success": False,
                 "error": f"Invalid email format: {to_email}"
             }
 
-        # Build message
-        msg = MIMEMultipart()
-        msg["From"] = f"{self.config.sender_name} <{self.config.sender_email}>"
-        msg["To"] = to_email
-        msg["Subject"] = subject
+        result = self.backend.send(to_email, subject, body, cc=cc, reply_to=reply_to)
 
-        if cc:
-            msg["Cc"] = ", ".join(cc)
-        if reply_to:
-            msg["Reply-To"] = reply_to
-
-        msg.attach(MIMEText(body, "plain", "utf-8"))
-
-        # Dry run mode
-        if self.config.dry_run:
-            logger.info(f"[DRY RUN] Would send email to {to_email}: {subject}")
-            return {
-                "success": True,
-                "dry_run": True,
-                "to": to_email,
-                "subject": subject
-            }
-
-        # Send via SMTP
-        try:
-            with smtplib.SMTP(self.config.smtp_server, self.config.smtp_port) as server:
-                if self.config.use_tls:
-                    server.starttls()
-
-                server.login(self.config.sender_email, self.config.sender_password)
-
-                recipients = [to_email] + (cc or [])
-                server.sendmail(
-                    self.config.sender_email,
-                    recipients,
-                    msg.as_string()
-                )
-
+        if result.get("success"):
             self._sent_count += 1
-            logger.info(f"Email sent to {to_email}: {subject}")
+        else:
+            self._failed_count += 1
 
-            return {
-                "success": True,
-                "to": to_email,
-                "subject": subject,
-                "sent_at": datetime.now().isoformat()
-            }
-
-        except smtplib.SMTPAuthenticationError as e:
-            logger.error(f"SMTP auth failed: {e}")
-            self._failed_count += 1
-            return {
-                "success": False,
-                "error": "Authentication failed. Check email/password.",
-                "details": str(e)
-            }
-        except smtplib.SMTPException as e:
-            logger.error(f"SMTP error: {e}")
-            self._failed_count += 1
-            return {
-                "success": False,
-                "error": f"SMTP error: {e}"
-            }
-        except Exception as e:
-            logger.error(f"Email send failed: {e}")
-            self._failed_count += 1
-            return {
-                "success": False,
-                "error": str(e)
-            }
+        return result
 
     def send_invoice_reminder(
         self,
@@ -762,7 +700,6 @@ class Mailer:
         Returns:
             Send result with invoice tracking
         """
-        # Get vendor email
         vendor_email = self.vendor_directory.get_email(
             vendor_name=invoice.get("vendor_name", ""),
             tax_number=invoice.get("vendor_tax_number")
@@ -818,23 +755,31 @@ class InvoiceReminderOrchestrator:
     Combines:
     - DatabaseManager: Track invoice status
     - InvoiceAgent: Generate emails
-    - Mailer: Send emails
+    - Mailer: Send emails (via pluggable EmailBackend)
 
-    Usage:
+    Usage (new):
+        backend = GmailSMTPBackend(GmailSMTPConfig(...))
         orchestrator = InvoiceReminderOrchestrator(
             db_path="data/invoices.db",
             gemini_api_key="your-api-key",
-            gmail_config=mailer_config
+            email_backend=backend,
         )
-        results = orchestrator.process_missing_invoices()
+
+    Usage (legacy -- still works):
+        orchestrator = InvoiceReminderOrchestrator(
+            db_path="data/invoices.db",
+            gemini_api_key="your-api-key",
+            gmail_config=MailerConfig(...),
+        )
     """
 
     def __init__(
         self,
         db_path: str,
         gemini_api_key: str,
-        gmail_config: MailerConfig,
-        company_name: str = "Cégünk"
+        gmail_config: Optional[MailerConfig] = None,
+        company_name: str = "Cégünk",
+        email_backend: Optional[EmailBackend] = None,
     ):
         from database_manager import DatabaseManager
 
@@ -846,7 +791,12 @@ class InvoiceReminderOrchestrator:
             company_name=company_name
         ))
 
-        self.mailer = Mailer(gmail_config)
+        if email_backend is not None:
+            self.mailer = Mailer(email_backend)
+        elif gmail_config is not None:
+            self.mailer = Mailer(gmail_config)
+        else:
+            raise ValueError("Provide either email_backend or gmail_config")
 
     def process_missing_invoices(
         self,

@@ -25,6 +25,7 @@ from api.auth import router as auth_router
 from api.invoices import router as invoices_router
 from api.approval import router as approval_router
 from api.stats import router as stats_router
+from api.public import router as public_router
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ app.include_router(auth_router)
 app.include_router(invoices_router)
 app.include_router(approval_router)
 app.include_router(stats_router)
+app.include_router(public_router)
 
 
 # =============================================================================

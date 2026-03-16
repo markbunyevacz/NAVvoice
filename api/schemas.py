@@ -98,6 +98,14 @@ class UploadResponse(BaseModel):
     detail: str
 
 
+class PublicUploadResponse(BaseModel):
+    """Response for the unauthenticated vendor upload endpoint."""
+    filename: str
+    matched: bool
+    invoice_number: Optional[str] = None
+    detail: str
+
+
 # ---------------------------------------------------------------------------
 # Approval Queue
 # ---------------------------------------------------------------------------

@@ -379,7 +379,7 @@ class TestRetryMechanism:
         mock_session.post.return_value = mock_response
         mock_session_class.return_value = mock_session
 
-        client = NavClient(valid_credentials, use_test_api=True)
+        client = NavClient(valid_credentials, use_test_api=True, software_id="HUTEST12345-0001")
         client.session = mock_session
 
         result = client._execute_with_retry("/queryInvoiceDigest", b"<request/>")
@@ -404,7 +404,7 @@ class TestRetryMechanism:
         ]
         mock_session_class.return_value = mock_session
 
-        client = NavClient(valid_credentials, use_test_api=True)
+        client = NavClient(valid_credentials, use_test_api=True, software_id="HUTEST12345-0001")
         client.session = mock_session
 
         result = client._execute_with_retry("/queryInvoiceDigest", b"<request/>")
@@ -508,6 +508,42 @@ class TestNavApiErrorSept2025Blocking:
         for code in ("435", "734", "1311"):
             err = NavApiError(code, "test")
             assert err.is_sept_2025_blocking is False
+
+
+# =============================================================================
+# SOFTWARE_ID CONFIGURATION TESTS
+# =============================================================================
+
+class TestSoftwareIdConfiguration:
+    """Tests for SOFTWARE_ID configuration enforcement."""
+
+    def test_raises_without_software_id(self, valid_credentials):
+        """Must raise ValueError when no software_id is provided and env var is unset."""
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(ValueError, match="NAV_SOFTWARE_ID not configured"):
+                NavClient(credentials=valid_credentials, use_test_api=True)
+
+    def test_accepts_explicit_software_id(self, valid_credentials):
+        client = NavClient(
+            credentials=valid_credentials,
+            use_test_api=True,
+            software_id="HUTEST99999-0001"
+        )
+        assert client.software_id == "HUTEST99999-0001"
+
+    def test_reads_env_var_fallback(self, valid_credentials):
+        with patch.dict("os.environ", {"NAV_SOFTWARE_ID": "HUENV00000-0001"}):
+            client = NavClient(credentials=valid_credentials, use_test_api=True)
+            assert client.software_id == "HUENV00000-0001"
+
+    def test_explicit_param_overrides_env_var(self, valid_credentials):
+        with patch.dict("os.environ", {"NAV_SOFTWARE_ID": "HUENV00000-0001"}):
+            client = NavClient(
+                credentials=valid_credentials,
+                use_test_api=True,
+                software_id="HUPARAM0000-0001"
+            )
+            assert client.software_id == "HUPARAM0000-0001"
 
 
 # =============================================================================
