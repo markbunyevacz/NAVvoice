@@ -36,13 +36,32 @@ NAMESPACES = {
 }
 
 
+_SEPT_2025_BLOCKING_VALUES = frozenset({
+    "330", "434", "560",
+    "581", "582", "583", "584",
+    "591", "593", "596", "620", "701",
+    "1150", "1300", "1310",
+})
+"""Official final 15 WARN->ERROR codes confirmed by NTCA-tax (Jul 20, 2025)
+in GitHub nav-gov-hu/Online-Invoice discussion #1144.
+
+Codes 82, 91, 1140 were in the original March 2025 plan but dropped after
+community consultation. Codes 690, 700, 1301 were deactivated entirely.
+Codes 435, 734, 1311 (Technical Guide) are pre-existing validation codes,
+not part of the Sept 2025 WARN->ERROR transition.
+"""
+
+
 class NavErrorCode(Enum):
     """
     NAV API error codes.
 
-    Retryable errors: Transient failures that may succeed on retry
-    Non-retryable errors: Permanent failures requiring code/data fixes
-    Validation errors: Sept 2025 blocking validation errors
+    Retryable errors: Transient failures that may succeed on retry.
+    Non-retryable errors: Permanent failures requiring code/data fixes.
+    Sept 2025 blocking: 15 WARN codes that become blocking ERRORs from Sept 15, 2025,
+        per NTCA-tax announcement in nav-gov-hu/Online-Invoice#1144 (Jul 20, 2025).
+    VAT calculation: Pre-existing validation codes from the Technical Guide (435, 734, 1311).
+    Other validation: Codes 82, 91, 1140 remain as WARNINGs (removed from blocking plan).
     """
     # Retryable errors (transient failures)
     OPERATION_FAILED = "OPERATION_FAILED"
@@ -58,10 +77,37 @@ class NavErrorCode(Enum):
     EMPTY_TOKEN = "EMPTY_TOKEN"
     TOKEN_DECRYPTION_FAILED = "TOKEN_DECRYPTION_FAILED"
 
-    # September 2025 validation errors (will become blocking)
-    VAT_RATE_MISMATCH = "435"  # VAT rate doesn't match tax number
-    VAT_SUMMARY_MISMATCH = "734"  # VAT summary calculation error
-    VAT_LINE_ITEM_ERROR = "1311"  # VAT line item inconsistency
+    # --- VAT calculation validation (Technical Guide, pre-existing) ---
+    VAT_RATE_MISMATCH = "435"
+    VAT_SUMMARY_MISMATCH = "734"
+    VAT_LINE_ITEM_ERROR = "1311"
+
+    # --- Sept 2025 confirmed blocking (15 WARN -> ERROR) ---
+    INVALID_COMPLETION_DATE_RANGE = "330"
+    MISSING_UNIT_OF_MEASURE_OWN = "434"
+    MODIFICATION_NUMBER_SAME_AS_ORIGINAL = "560"
+    INCORRECT_VAT_MARKING_581 = "581"
+    INCORRECT_VAT_MARKING_582 = "582"
+    INCORRECT_VAT_MARKING_583 = "583"
+    INCORRECT_VAT_MARKING_584 = "584"
+    VAT_DATA_WITH_EXEMPTION = "591"
+    VAT_DATA_OUT_OF_SCOPE = "593"
+    DOMESTIC_REVERSE_CHARGE_BUYER = "596"
+    MISSING_PERFORMANCE_DATE_AGGREGATE = "620"
+    VAT_SUMMARY_OUT_OF_SCOPE = "701"
+    UNREALISTIC_MODIFICATION_SEQUENCE = "1150"
+    EXCHANGE_RATE_MISMATCH = "1300"
+    EXTREME_EXCHANGE_RATE = "1310"
+
+    # --- Remained as WARNING (removed from Sept 2025 blocking plan) ---
+    INVALID_BUYER_VAT_GROUP = "82"
+    TAX_NUMBER_VAT_GROUP_ISSUE = "91"
+    MODIFY_CANCELLED_INVOICE = "1140"
+
+    @property
+    def is_sept_2025_blocking(self) -> bool:
+        """True if this error code becomes a blocking ERROR from Sept 15, 2025."""
+        return self.value in _SEPT_2025_BLOCKING_VALUES
 
 
 @dataclass
@@ -106,6 +152,11 @@ class NavApiError(Exception):
             NavErrorCode.TIMEOUT.value,
         ]
         return self.code in retryable_codes
+
+    @property
+    def is_sept_2025_blocking(self) -> bool:
+        """True if this NAV error is a Sept 2025 blocking validation code."""
+        return self.code in _SEPT_2025_BLOCKING_VALUES
 
 
 class NavClient:
@@ -411,10 +462,9 @@ class NavClient:
         """
         Validate invoice against September 2025 blocking rules before submission.
 
-        These validations will become BLOCKING errors in NAV starting Sept 15, 2025:
-        - Error 435: VAT rate doesn't match tax number status
-        - Error 734: VAT summary calculation mismatch
-        - Error 1311: VAT line item inconsistency
+        Covers both VAT calculation errors (Technical Guide) and formal validation
+        errors (Sept 2025 regression matrix). Returns error messages prefixed with
+        the NAV error code in brackets, e.g. ``[734] ...``.
 
         Args:
             invoice_xml: Decoded invoice XML bytes
@@ -422,53 +472,195 @@ class NavClient:
         Returns:
             List of validation error messages (empty if valid)
         """
-        errors = []
+        errors: List[str] = []
 
         try:
             root = etree.fromstring(invoice_xml)
+            ns = NAMESPACES.get('data', '')
 
-            # Extract VAT summary totals
-            vat_summary_total = 0.0
-            line_item_vat_total = 0.0
-
-            # Find VAT summary section
-            for vat_rate_elem in root.findall(".//{%s}summaryByVatRate" % NAMESPACES.get('data', '')):
-                vat_amount = vat_rate_elem.findtext(".//{%s}vatRateVatAmount" % NAMESPACES.get('data', ''))
-                if vat_amount:
-                    try:
-                        vat_summary_total += float(vat_amount)
-                    except ValueError:
-                        pass
-
-            # Also try without namespace for flexibility
-            for vat_rate_elem in root.findall(".//summaryByVatRate"):
-                vat_amount = vat_rate_elem.findtext(".//vatRateVatAmount")
-                if vat_amount:
-                    try:
-                        vat_summary_total += float(vat_amount)
-                    except ValueError:
-                        pass
-
-            # Find line items and validate VAT calculations
-            for line_elem in root.findall(".//{%s}line" % NAMESPACES.get('data', '')):
-                self._validate_line_item(line_elem, errors)
-
-            for line_elem in root.findall(".//line"):
-                line_item_vat_total += self._validate_line_item(line_elem, errors)
-
-            # Validate VAT summary matches line items (Error 734)
-            if vat_summary_total > 0 and line_item_vat_total > 0:
-                difference = abs(vat_summary_total - line_item_vat_total)
-                if difference > 1.0:  # 1 HUF tolerance
-                    errors.append(
-                        f"[734] VAT summary mismatch: line items total {line_item_vat_total:.2f}, "
-                        f"summary shows {vat_summary_total:.2f} (diff: {difference:.2f} HUF)"
-                    )
+            self._validate_completion_date_range(root, ns, errors)
+            self._validate_reverse_charge_buyer(root, ns, errors)
+            self._validate_modification_number(root, ns, errors)
+            self._validate_exchange_rate(root, ns, errors)
+            self._validate_vat_summary_and_lines(root, ns, errors)
 
         except etree.XMLSyntaxError as e:
             logger.warning(f"Could not parse invoice XML for validation: {e}")
 
         return errors
+
+    # ------------------------------------------------------------------
+    # Individual Sept 2025 validation sub-checks
+    # ------------------------------------------------------------------
+
+    def _validate_completion_date_range(
+        self, root: etree.Element, ns: str, errors: List[str]
+    ) -> None:
+        """[330] Performance period end date must not precede start date."""
+        for line_elem in root.findall(".//{%s}line" % ns) or root.findall(".//line"):
+            date_from_str = (
+                line_elem.findtext(".//{%s}lineDeliveryDate" % ns)
+                or line_elem.findtext(".//lineDeliveryDate")
+            )
+            date_to_str = (
+                line_elem.findtext(".//{%s}lineDeliveryDateTo" % ns)
+                or line_elem.findtext(".//lineDeliveryDateTo")
+            )
+            if date_from_str and date_to_str and date_to_str < date_from_str:
+                line_number = (
+                    line_elem.findtext(".//{%s}lineNumber" % ns)
+                    or line_elem.findtext(".//lineNumber")
+                    or "?"
+                )
+                errors.append(
+                    f"[330] Line {line_number}: performance period end "
+                    f"({date_to_str}) precedes start ({date_from_str})"
+                )
+
+    def _validate_reverse_charge_buyer(
+        self, root: etree.Element, ns: str, errors: List[str]
+    ) -> None:
+        """[596] Domestic reverse charge requires buyer to be domestic VAT taxpayer."""
+        exemption_case = (
+            root.findtext(".//{%s}vatExemptionCase" % ns)
+            or root.findtext(".//vatExemptionCase")
+        )
+        if not exemption_case:
+            return
+
+        is_reverse_charge = exemption_case in ("AAM", "DOMESTIC_REVERSE_CHARGE")
+        if not is_reverse_charge:
+            return
+
+        buyer_vat_code = (
+            root.findtext(".//{%s}customerTaxNumber/{%s}vatCode" % (ns, ns))
+            or root.findtext(".//customerTaxNumber/vatCode")
+        )
+        buyer_taxpayer_id = (
+            root.findtext(".//{%s}customerTaxNumber/{%s}taxpayerId" % (ns, ns))
+            or root.findtext(".//customerTaxNumber/taxpayerId")
+        )
+
+        if not buyer_taxpayer_id:
+            errors.append(
+                "[596] Domestic reverse charge but buyer has no tax number"
+            )
+        elif buyer_vat_code and buyer_vat_code != "2":
+            errors.append(
+                f"[596] Domestic reverse charge but buyer vatCode={buyer_vat_code} "
+                f"(expected '2' for domestic VAT taxpayer)"
+            )
+
+    def _validate_modification_number(
+        self, root: etree.Element, ns: str, errors: List[str]
+    ) -> None:
+        """[560] Modification invoice number must differ from original."""
+        invoice_number = (
+            root.findtext(".//{%s}invoiceNumber" % ns)
+            or root.findtext(".//invoiceNumber")
+        )
+        original_invoice_number = (
+            root.findtext(".//{%s}originalInvoiceNumber" % ns)
+            or root.findtext(".//originalInvoiceNumber")
+        )
+        if (
+            invoice_number
+            and original_invoice_number
+            and invoice_number == original_invoice_number
+        ):
+            errors.append(
+                f"[560] Modification invoice number '{invoice_number}' is "
+                f"identical to original invoice number"
+            )
+
+    def _validate_exchange_rate(
+        self, root: etree.Element, ns: str, errors: List[str]
+    ) -> None:
+        """[1300/1310] Exchange rate sanity checks for foreign-currency invoices."""
+        currency = (
+            root.findtext(".//{%s}currencyCode" % ns)
+            or root.findtext(".//currencyCode")
+        )
+        if not currency or currency == "HUF":
+            return
+
+        rate_str = (
+            root.findtext(".//{%s}exchangeRate" % ns)
+            or root.findtext(".//exchangeRate")
+        )
+        if not rate_str:
+            return
+
+        try:
+            rate = float(rate_str)
+        except (ValueError, TypeError):
+            return
+
+        net_huf_str = (
+            root.findtext(".//{%s}invoiceNetAmountHUF" % ns)
+            or root.findtext(".//invoiceNetAmountHUF")
+        )
+        net_str = (
+            root.findtext(".//{%s}invoiceNetAmount" % ns)
+            or root.findtext(".//invoiceNetAmount")
+        )
+
+        if net_huf_str and net_str:
+            try:
+                net_huf = float(net_huf_str)
+                net = float(net_str)
+                if net > 0:
+                    implied_rate = net_huf / net
+                    if abs(implied_rate - rate) > rate * 0.1:
+                        errors.append(
+                            f"[1300] Exchange rate {rate} does not match "
+                            f"HUF/foreign ratio {implied_rate:.4f} "
+                            f"(net_HUF={net_huf:.2f}, net={net:.2f})"
+                        )
+            except (ValueError, TypeError, ZeroDivisionError):
+                pass
+
+        if rate <= 0.1 or rate > 100_000:
+            errors.append(
+                f"[1310] Extreme exchange rate value: {rate} for {currency}"
+            )
+
+    def _validate_vat_summary_and_lines(
+        self, root: etree.Element, ns: str, errors: List[str]
+    ) -> None:
+        """[734] VAT summary vs line items and [1311] per-line VAT calculation."""
+        vat_summary_total = 0.0
+        line_item_vat_total = 0.0
+
+        for vat_rate_elem in root.findall(".//{%s}summaryByVatRate" % ns):
+            vat_amount = vat_rate_elem.findtext(".//{%s}vatRateVatAmount" % ns)
+            if vat_amount:
+                try:
+                    vat_summary_total += float(vat_amount)
+                except ValueError:
+                    pass
+
+        for vat_rate_elem in root.findall(".//summaryByVatRate"):
+            vat_amount = vat_rate_elem.findtext(".//vatRateVatAmount")
+            if vat_amount:
+                try:
+                    vat_summary_total += float(vat_amount)
+                except ValueError:
+                    pass
+
+        for line_elem in root.findall(".//{%s}line" % ns):
+            self._validate_line_item(line_elem, errors)
+
+        for line_elem in root.findall(".//line"):
+            line_item_vat_total += self._validate_line_item(line_elem, errors)
+
+        if vat_summary_total > 0 and line_item_vat_total > 0:
+            difference = abs(vat_summary_total - line_item_vat_total)
+            if difference > 1.0:
+                errors.append(
+                    f"[734] VAT summary mismatch: line items total {line_item_vat_total:.2f}, "
+                    f"summary shows {vat_summary_total:.2f} (diff: {difference:.2f} HUF)"
+                )
 
     def _validate_line_item(self, line_elem: etree.Element, errors: List[str]) -> float:
         """

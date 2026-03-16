@@ -476,6 +476,41 @@ class TestQueryInvoices:
 
 
 # =============================================================================
+# SEPT 2025 BLOCKING PROPERTY ON NavApiError
+# =============================================================================
+
+class TestNavApiErrorSept2025Blocking:
+    """Verify is_sept_2025_blocking on NavApiError returned by the client."""
+
+    def test_blocking_code_from_response(self, nav_client):
+        err = NavApiError("596", "Reverse charge buyer error")
+        assert err.is_sept_2025_blocking is True
+        assert err.is_retryable is False
+
+    def test_retryable_code_not_blocking(self, nav_client):
+        err = NavApiError("OPERATION_FAILED", "transient failure")
+        assert err.is_sept_2025_blocking is False
+        assert err.is_retryable is True
+
+    def test_unknown_code_not_blocking(self, nav_client):
+        err = NavApiError("UNKNOWN_CODE", "unknown")
+        assert err.is_sept_2025_blocking is False
+        assert err.is_retryable is False
+
+    def test_dropped_codes_not_blocking(self, nav_client):
+        """82, 91, 1140 stayed as WARNING per NTCA-tax Jul 2025 decision."""
+        for code in ("82", "91", "1140"):
+            err = NavApiError(code, "test")
+            assert err.is_sept_2025_blocking is False
+
+    def test_technical_guide_codes_not_blocking(self, nav_client):
+        """435, 734, 1311 are pre-existing, not part of WARN->ERROR transition."""
+        for code in ("435", "734", "1311"):
+            err = NavApiError(code, "test")
+            assert err.is_sept_2025_blocking is False
+
+
+# =============================================================================
 # RUN TESTS
 # =============================================================================
 

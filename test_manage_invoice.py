@@ -786,10 +786,73 @@ class TestNavErrorCode:
             assert error.is_retryable is False, f"{code} should not be retryable"
 
     def test_sept_2025_validation_error_codes(self):
-        """Should have Sept 2025 validation error codes."""
+        """Should have all Sept 2025 validation error codes."""
         assert NavErrorCode.VAT_RATE_MISMATCH.value == "435"
         assert NavErrorCode.VAT_SUMMARY_MISMATCH.value == "734"
         assert NavErrorCode.VAT_LINE_ITEM_ERROR.value == "1311"
+        assert NavErrorCode.INVALID_COMPLETION_DATE_RANGE.value == "330"
+        assert NavErrorCode.DOMESTIC_REVERSE_CHARGE_BUYER.value == "596"
+        assert NavErrorCode.UNREALISTIC_MODIFICATION_SEQUENCE.value == "1150"
+        assert NavErrorCode.EXCHANGE_RATE_MISMATCH.value == "1300"
+        assert NavErrorCode.EXTREME_EXCHANGE_RATE.value == "1310"
+        assert NavErrorCode.MODIFICATION_NUMBER_SAME_AS_ORIGINAL.value == "560"
+
+    def test_sept_2025_blocking_property(self):
+        """Confirmed 15 WARN->ERROR codes should have is_sept_2025_blocking = True."""
+        blocking_members = [
+            NavErrorCode.INVALID_COMPLETION_DATE_RANGE,
+            NavErrorCode.DOMESTIC_REVERSE_CHARGE_BUYER,
+            NavErrorCode.MODIFICATION_NUMBER_SAME_AS_ORIGINAL,
+            NavErrorCode.EXCHANGE_RATE_MISMATCH,
+            NavErrorCode.EXTREME_EXCHANGE_RATE,
+        ]
+        for member in blocking_members:
+            assert member.is_sept_2025_blocking is True, f"{member.name} should be blocking"
+
+        non_blocking = [
+            NavErrorCode.OPERATION_FAILED,
+            NavErrorCode.MAINTENANCE,
+            NavErrorCode.INVALID_CREDENTIALS,
+            NavErrorCode.VAT_RATE_MISMATCH,
+            NavErrorCode.INVALID_BUYER_VAT_GROUP,
+            NavErrorCode.MODIFY_CANCELLED_INVOICE,
+        ]
+        for member in non_blocking:
+            assert member.is_sept_2025_blocking is False, f"{member.name} should not be blocking"
+
+    def test_manage_invoice_sept_2025_catches_330(self, nav_client, mock_session):
+        """manage_invoice should reject an invoice with date range error (330)."""
+        invalid_invoice = b"""<?xml version="1.0"?>
+        <Invoice>
+            <line>
+                <lineNumber>1</lineNumber>
+                <lineDeliveryDate>2024-06-15</lineDeliveryDate>
+                <lineDeliveryDateTo>2024-06-01</lineDeliveryDateTo>
+            </line>
+        </Invoice>"""
+        invalid_base64 = base64.b64encode(invalid_invoice).decode("utf-8")
+
+        operations = [{"index": 1, "operation": "CREATE", "invoiceData": invalid_base64}]
+        with pytest.raises(NavApiError) as exc_info:
+            nav_client.manage_invoice(operations, validate_sept_2025=True)
+        assert exc_info.value.code == "SEPT_2025_VALIDATION"
+        assert "330" in exc_info.value.message
+
+    def test_manage_invoice_sept_2025_catches_560(self, nav_client, mock_session):
+        """manage_invoice should reject an invoice where mod number == original (560)."""
+        invalid_invoice = b"""<?xml version="1.0"?>
+        <Invoice>
+            <invoiceNumber>INV-001</invoiceNumber>
+            <modificationReference>
+                <originalInvoiceNumber>INV-001</originalInvoiceNumber>
+            </modificationReference>
+        </Invoice>"""
+        invalid_base64 = base64.b64encode(invalid_invoice).decode("utf-8")
+
+        operations = [{"index": 1, "operation": "MODIFY", "invoiceData": invalid_base64}]
+        with pytest.raises(NavApiError) as exc_info:
+            nav_client.manage_invoice(operations, validate_sept_2025=True)
+        assert "560" in exc_info.value.message
 
 
 # =============================================================================
