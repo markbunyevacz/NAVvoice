@@ -18,20 +18,75 @@ Setup:
 
 import os
 import json
-import time
 import logging
+from types import SimpleNamespace
 from typing import Optional, Dict, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from functools import lru_cache
 from threading import Lock
 
-from google.cloud import secretmanager
-from google.api_core import exceptions as gcp_exceptions
+secretmanager: Any
+gcp_exceptions: Any
 
-from nav_client import NavCredentials
+try:
+    from google.cloud import secretmanager
+    from google.api_core import exceptions as gcp_exceptions
+except ImportError:
+    class _UnavailableSecretManagerClient:
+        """Fallback client that preserves patch targets in test environments."""
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "google-cloud-secret-manager not installed. "
+                "Run: pip install google-cloud-secret-manager"
+            )
+
+    class _GcpNotFound(Exception):
+        """Fallback NotFound error used when google.api_core is unavailable."""
+
+    class _GcpPermissionDenied(Exception):
+        """Fallback PermissionDenied used when google.api_core is unavailable."""
+
+    secretmanager = SimpleNamespace(
+        SecretManagerServiceClient=_UnavailableSecretManagerClient
+    )
+    gcp_exceptions = SimpleNamespace(
+        NotFound=_GcpNotFound,
+        PermissionDenied=_GcpPermissionDenied,
+    )
+    logging.warning(
+        "google-cloud-secret-manager not installed. "
+        "NavSecretManager will require mocking in tests."
+    )
+
+try:
+    from nav_client import NavCredentials as _NavCredentials
+except ImportError:
+    @dataclass
+    class NavCredentials:
+        """Fallback NAV credentials container for lightweight unit tests."""
+
+        login: str
+        password: str
+        signature_key: str
+        replacement_key: str
+        tax_number: str
+else:
+    NavCredentials = _NavCredentials
 
 logger = logging.getLogger(__name__)
+
+
+def _load_nav_client_class():
+    """Import NavClient lazily so unit tests do not need full runtime deps."""
+    try:
+        from nav_client import NavClient
+    except ImportError as exc:
+        raise ImportError(
+            "nav_client dependencies are unavailable. "
+            "Install the full requirements or patch _load_nav_client_class in tests."
+        ) from exc
+    return NavClient
 
 
 # =============================================================================
@@ -99,7 +154,12 @@ class NavSecretManager:
         client = secret_mgr.create_nav_client("tenant-123")
     """
     
-    def __init__(self, config: SecretManagerConfig):
+    def __init__(
+        self,
+        config: SecretManagerConfig,
+        client: Optional[Any] = None,
+        client_factory: Optional[Any] = None
+    ):
         """
         Initialize Secret Manager client.
         
@@ -107,7 +167,11 @@ class NavSecretManager:
             config: Secret Manager configuration
         """
         self.config = config
-        self._client = secretmanager.SecretManagerServiceClient()
+        if client is not None:
+            self._client = client
+        else:
+            factory = client_factory or secretmanager.SecretManagerServiceClient
+            self._client = factory()
         self._cache: Dict[str, CachedSecret] = {}
         self._cache_lock = Lock()
         
@@ -349,11 +413,10 @@ class NavSecretManager:
         Returns:
             Configured NavClient instance
         """
-        from nav_client import NavClient
-
         credentials = self.get_credentials(tenant_id)
         resolved_software_id = software_id or self.config.software_id
-        return NavClient(
+        nav_client_class = _load_nav_client_class()
+        return nav_client_class(
             credentials=credentials,
             use_test_api=use_test_api,
             software_id=resolved_software_id

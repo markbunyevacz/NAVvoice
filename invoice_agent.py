@@ -780,9 +780,11 @@ class InvoiceReminderOrchestrator:
         gmail_config: Optional[MailerConfig] = None,
         company_name: str = "Cégünk",
         email_backend: Optional[EmailBackend] = None,
+        tenant_id: Optional[str] = None,
     ):
         from database_manager import DatabaseManager
 
+        self.tenant_id = tenant_id
         self.db = DatabaseManager(db_path)
         self.db.initialize()
 
@@ -801,7 +803,8 @@ class InvoiceReminderOrchestrator:
     def process_missing_invoices(
         self,
         days_old: int = 5,
-        max_emails: int = 10
+        max_emails: int = 10,
+        tenant_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Process all missing invoices and send reminders.
@@ -813,8 +816,12 @@ class InvoiceReminderOrchestrator:
         Returns:
             Processing results summary
         """
+        resolved_tenant_id = tenant_id or self.tenant_id
+        if not resolved_tenant_id:
+            raise ValueError("tenant_id is required to process missing invoices")
+
         # Get missing invoices
-        missing = self.db.get_missing_invoices(days_old=days_old)
+        missing = self.db.get_missing_invoices(resolved_tenant_id, days_old=days_old)
 
         if not missing:
             return {"processed": 0, "message": "No missing invoices found"}
@@ -855,7 +862,10 @@ class InvoiceReminderOrchestrator:
 
             if send_result["success"]:
                 # Update database
-                self.db.mark_as_emailed(invoice["nav_invoice_number"])
+                self.db.mark_as_emailed(
+                    resolved_tenant_id,
+                    invoice["nav_invoice_number"]
+                )
                 results["sent"] += 1
             else:
                 results["failed"] += 1

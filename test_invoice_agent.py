@@ -623,6 +623,184 @@ class TestInvoiceAgent:
         assert len(results) == 2
         assert all("invoice_data" in r for r in results)
 
+    def test_agent_init_requires_genai_dependency(self, agent_config):
+        """Should raise ImportError when google-genai is unavailable."""
+        with patch('invoice_agent.GENAI_AVAILABLE', False):
+            with pytest.raises(ImportError, match="google-genai not installed"):
+                InvoiceAgent(agent_config)
+
+    def test_generate_chasing_email_sanitizes_minor_validation_issues(self, mock_genai, agent_config):
+        """Minor validation issues should take the sanitize_output recovery path."""
+        mock, mock_models = mock_genai
+
+        mock_response = MagicMock()
+        mock_response.text = "Raw INV-001 response with 100 000 Ft."
+        mock_models.generate_content.return_value = mock_response
+
+        agent = InvoiceAgent(agent_config)
+        with patch.object(agent.validator, 'validate', return_value=(False, ["Email too short"])), \
+             patch.object(agent.validator, 'sanitize_output', return_value="Sanitized INV-001 response with 100 000 Ft.") as mock_sanitize:
+            result = agent.generate_chasing_email(
+                vendor="Test Vendor",
+                invoice_num="INV-001",
+                amount=100000,
+                date="2024-01-15"
+            )
+
+        assert result["success"] is True
+        assert result["raw_ai_response"] == "Sanitized INV-001 response with 100 000 Ft."
+        mock_sanitize.assert_called_once()
+
+
+# =============================================================================
+# ORCHESTRATOR TESTS
+# =============================================================================
+
+class TestInvoiceReminderOrchestrator:
+    """Test orchestrator workflow with fully mocked dependencies."""
+
+    @pytest.fixture
+    def orchestrator(self):
+        """Orchestrator instance without running the production constructor."""
+        orchestrator = InvoiceReminderOrchestrator.__new__(InvoiceReminderOrchestrator)
+        orchestrator.db = MagicMock()
+        orchestrator.agent = MagicMock()
+        orchestrator.mailer = MagicMock()
+        orchestrator.tenant_id = "tenant-001"
+        return orchestrator
+
+    def test_process_missing_invoices_requires_tenant_context(self, orchestrator):
+        """Should require tenant_id from either constructor or call."""
+        orchestrator.tenant_id = None
+
+        with pytest.raises(ValueError, match="tenant_id is required"):
+            orchestrator.process_missing_invoices()
+
+    def test_process_missing_invoices_no_missing_returns_message(self, orchestrator):
+        """Should return early when there are no missing invoices."""
+        orchestrator.db.get_missing_invoices.return_value = []
+
+        result = orchestrator.process_missing_invoices(days_old=7)
+
+        assert result == {"processed": 0, "message": "No missing invoices found"}
+        orchestrator.db.get_missing_invoices.assert_called_once_with("tenant-001", days_old=7)
+        orchestrator.agent.generate_chasing_email.assert_not_called()
+
+    def test_process_missing_invoices_applies_tones_and_marks_sent(self, orchestrator):
+        """Should map email_count to escalation tone and mark sent invoices."""
+        invoices = [
+            {
+                "vendor_name": "Vendor A",
+                "nav_invoice_number": "INV-001",
+                "amount": 100000,
+                "invoice_date": "2024-01-15",
+                "email_count": 0,
+            },
+            {
+                "vendor_name": "Vendor B",
+                "nav_invoice_number": "INV-002",
+                "amount": 100000,
+                "invoice_date": "2024-01-16",
+                "email_count": 1,
+            },
+            {
+                "vendor_name": "Vendor C",
+                "nav_invoice_number": "INV-003",
+                "amount": 100000,
+                "invoice_date": "2024-01-17",
+                "email_count": 2,
+            },
+            {
+                "vendor_name": "Vendor D",
+                "nav_invoice_number": "INV-004",
+                "amount": 100000,
+                "invoice_date": "2024-01-18",
+                "email_count": 3,
+            },
+        ]
+        orchestrator.db.get_missing_invoices.return_value = invoices
+        orchestrator.agent.generate_chasing_email.return_value = {
+            "success": True,
+            "email_subject": "Subject",
+            "email_body": "Body",
+        }
+        orchestrator.mailer.send_invoice_reminder.return_value = {"success": True}
+
+        result = orchestrator.process_missing_invoices()
+
+        assert result["processed"] == 4
+        assert result["sent"] == 4
+        assert result["failed"] == 0
+        assert [detail["tone"] for detail in result["details"]] == [
+            EmailTone.POLITE.value,
+            EmailTone.FIRM.value,
+            EmailTone.URGENT.value,
+            EmailTone.FINAL.value,
+        ]
+        assert [
+            call.kwargs["tone"] for call in orchestrator.agent.generate_chasing_email.call_args_list
+        ] == [
+            EmailTone.POLITE,
+            EmailTone.FIRM,
+            EmailTone.URGENT,
+            EmailTone.FINAL,
+        ]
+        assert orchestrator.db.mark_as_emailed.call_count == 4
+        orchestrator.db.mark_as_emailed.assert_any_call("tenant-001", "INV-001")
+        orchestrator.db.mark_as_emailed.assert_any_call("tenant-001", "INV-004")
+
+    def test_process_missing_invoices_respects_max_emails_and_override_tenant(self, orchestrator):
+        """Should limit batch size and pass explicit tenant_id to DB updates."""
+        invoices = [
+            {"vendor_name": "Vendor A", "nav_invoice_number": "INV-001", "amount": 1, "invoice_date": "2024-01-15"},
+            {"vendor_name": "Vendor B", "nav_invoice_number": "INV-002", "amount": 2, "invoice_date": "2024-01-16"},
+            {"vendor_name": "Vendor C", "nav_invoice_number": "INV-003", "amount": 3, "invoice_date": "2024-01-17"},
+        ]
+        orchestrator.db.get_missing_invoices.return_value = invoices
+        orchestrator.agent.generate_chasing_email.return_value = {
+            "success": True,
+            "email_subject": "Subject",
+            "email_body": "Body",
+        }
+        orchestrator.mailer.send_invoice_reminder.return_value = {"success": True}
+
+        result = orchestrator.process_missing_invoices(max_emails=2, tenant_id="tenant-override")
+
+        assert result["processed"] == 2
+        assert len(result["details"]) == 2
+        orchestrator.db.get_missing_invoices.assert_called_once_with("tenant-override", days_old=5)
+        orchestrator.db.mark_as_emailed.assert_any_call("tenant-override", "INV-001")
+        orchestrator.db.mark_as_emailed.assert_any_call("tenant-override", "INV-002")
+        assert orchestrator.db.mark_as_emailed.call_count == 2
+
+    def test_process_missing_invoices_tracks_failed_sends(self, orchestrator):
+        """Should count failed sends and avoid DB updates for failures."""
+        orchestrator.db.get_missing_invoices.return_value = [
+            {
+                "vendor_name": "Vendor A",
+                "nav_invoice_number": "INV-001",
+                "amount": 100000,
+                "invoice_date": "2024-01-15",
+            }
+        ]
+        orchestrator.agent.generate_chasing_email.return_value = {
+            "success": True,
+            "email_subject": "Subject",
+            "email_body": "Body",
+        }
+        orchestrator.mailer.send_invoice_reminder.return_value = {
+            "success": False,
+            "error": "SMTP unavailable",
+        }
+
+        result = orchestrator.process_missing_invoices()
+
+        assert result["processed"] == 1
+        assert result["sent"] == 0
+        assert result["failed"] == 1
+        assert result["details"][0]["error"] == "SMTP unavailable"
+        orchestrator.db.mark_as_emailed.assert_not_called()
+
 
 # =============================================================================
 # VENDOR DIRECTORY TESTS

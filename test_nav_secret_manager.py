@@ -17,7 +17,7 @@ from unittest.mock import Mock, MagicMock, patch, PropertyMock
 from datetime import datetime, timedelta
 from threading import Thread
 
-from nav_client import NavCredentials
+from nav_secret_manager import NavCredentials
 
 
 # =============================================================================
@@ -271,8 +271,7 @@ class TestNavSecretManager:
 
     def test_get_credentials_not_found(self, secret_manager, mock_secret_manager_client):
         """Should raise SecretNotFoundError when credentials don't exist."""
-        from google.api_core import exceptions as gcp_exceptions
-        from nav_secret_manager import SecretNotFoundError
+        from nav_secret_manager import SecretNotFoundError, gcp_exceptions
         
         mock_secret_manager_client.access_secret_version.side_effect = gcp_exceptions.NotFound("Not found")
         
@@ -283,8 +282,7 @@ class TestNavSecretManager:
 
     def test_get_credentials_access_denied(self, secret_manager, mock_secret_manager_client):
         """Should raise SecretAccessError when access is denied."""
-        from google.api_core import exceptions as gcp_exceptions
-        from nav_secret_manager import SecretAccessError
+        from nav_secret_manager import SecretAccessError, gcp_exceptions
         
         mock_secret_manager_client.access_secret_version.side_effect = gcp_exceptions.PermissionDenied("Access denied")
         
@@ -322,7 +320,7 @@ class TestNavSecretManager:
 
     def test_store_credentials_new_secret(self, secret_manager, mock_secret_manager_client, valid_credentials):
         """Should create new secret when it doesn't exist."""
-        from google.api_core import exceptions as gcp_exceptions
+        from nav_secret_manager import gcp_exceptions
         
         # Secret doesn't exist
         mock_secret_manager_client.get_secret.side_effect = gcp_exceptions.NotFound("Not found")
@@ -359,7 +357,7 @@ class TestNavSecretManager:
 
     def test_store_credentials_with_labels(self, secret_manager, mock_secret_manager_client, valid_credentials):
         """Should include custom labels when creating secret."""
-        from google.api_core import exceptions as gcp_exceptions
+        from nav_secret_manager import gcp_exceptions
         
         mock_secret_manager_client.get_secret.side_effect = gcp_exceptions.NotFound("Not found")
         mock_version = MagicMock()
@@ -419,7 +417,7 @@ class TestNavSecretManager:
 
     def test_rotate_credentials_adds_rotation_label(self, secret_manager, mock_secret_manager_client, valid_credentials):
         """Should add rotation timestamp label."""
-        from google.api_core import exceptions as gcp_exceptions
+        from nav_secret_manager import gcp_exceptions
         
         # Secret doesn't exist (will be created)
         mock_secret_manager_client.get_secret.side_effect = gcp_exceptions.NotFound("Not found")
@@ -517,7 +515,9 @@ class TestNavSecretManager:
         mock_secret_manager_client.access_secret_version.return_value = mock_response
         
         # Patch where NavClient is imported (inside the method)
-        with patch('nav_client.NavClient') as mock_nav_client:
+        with patch('nav_secret_manager._load_nav_client_class') as mock_loader:
+            mock_nav_client = MagicMock()
+            mock_loader.return_value = mock_nav_client
             secret_manager.create_nav_client("tenant-001", use_test_api=True)
             
             mock_nav_client.assert_called_once()
@@ -531,7 +531,9 @@ class TestNavSecretManager:
         mock_secret_manager_client.access_secret_version.return_value = mock_response
         
         # Patch where NavClient is imported (inside the method)
-        with patch('nav_client.NavClient') as mock_nav_client:
+        with patch('nav_secret_manager._load_nav_client_class') as mock_loader:
+            mock_nav_client = MagicMock()
+            mock_loader.return_value = mock_nav_client
             secret_manager.create_nav_client(
                 "tenant-001",
                 software_id="CUSTOM-SOFTWARE-ID"
@@ -551,7 +553,9 @@ class TestNavSecretManager:
         mock_response.payload.data = credentials_json.encode('UTF-8')
         mock_secret_manager_client.access_secret_version.return_value = mock_response
 
-        with patch('nav_client.NavClient') as mock_nav_client:
+        with patch('nav_secret_manager._load_nav_client_class') as mock_loader:
+            mock_nav_client = MagicMock()
+            mock_loader.return_value = mock_nav_client
             secret_manager.create_nav_client("tenant-001")
 
             call_kwargs = mock_nav_client.call_args[1]
@@ -568,7 +572,9 @@ class TestNavSecretManager:
         mock_response.payload.data = credentials_json.encode('UTF-8')
         mock_secret_manager_client.access_secret_version.return_value = mock_response
 
-        with patch('nav_client.NavClient') as mock_nav_client:
+        with patch('nav_secret_manager._load_nav_client_class') as mock_loader:
+            mock_nav_client = MagicMock()
+            mock_loader.return_value = mock_nav_client
             secret_manager.create_nav_client("tenant-001", software_id="HUOVERRIDE-0001")
 
             call_kwargs = mock_nav_client.call_args[1]
@@ -611,7 +617,7 @@ class TestNavSecretManager:
 
     def test_delete_credentials_not_found(self, secret_manager, mock_secret_manager_client):
         """Should handle deletion of non-existent credentials gracefully."""
-        from google.api_core import exceptions as gcp_exceptions
+        from nav_secret_manager import gcp_exceptions
         
         mock_secret_manager_client.delete_secret.side_effect = gcp_exceptions.NotFound("Not found")
         
