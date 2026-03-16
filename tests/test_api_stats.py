@@ -54,6 +54,8 @@ def mock_db():
             "RECEIVED": {"count": 30, "total_amount": 2000000},
             "EMAILED": {"count": 2, "total_amount": 100000},
         },
+        "warning_invoices": 4,
+        "blocking_warning_invoices": 1,
     }
     return db
 
@@ -98,7 +100,13 @@ def _auth(token):
 
 
 class TestDashboardStats:
-    def test_returns_combined_stats(self, client, accountant_token, mock_db, mock_queue):
+    def test_returns_combined_stats(
+        self,
+        client,
+        accountant_token,
+        mock_db,
+        mock_queue,
+    ):
         resp = client.get("/api/v1/stats", headers=_auth(accountant_token))
         assert resp.status_code == 200
         data = resp.json()
@@ -106,6 +114,8 @@ class TestDashboardStats:
         assert data["invoices"]["total_invoices"] == 42
         assert data["invoices"]["critical_missing"] == 3
         assert "MISSING" in data["invoices"]["by_status"]
+        assert data["invoices"]["warning_invoices"] == 4
+        assert data["invoices"]["blocking_warning_invoices"] == 1
 
         assert data["approval_queue"]["total"] == 15
         assert data["approval_queue"]["pending"] == 5

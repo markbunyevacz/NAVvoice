@@ -18,6 +18,7 @@ Security:
     - Cross-tenant queries prevented by design
 """
 
+import json
 import sqlite3
 import logging
 from datetime import datetime, timedelta
@@ -59,6 +60,11 @@ class Invoice:
     pdf_path: Optional[str] = None
     notes: Optional[str] = None
     project_id: Optional[int] = None
+    has_warnings: bool = False
+    warning_count: int = 0
+    warning_codes: Optional[str] = None
+    has_blocking_warnings: bool = False
+    last_validated_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -76,6 +82,11 @@ class Invoice:
             "pdf_path": self.pdf_path,
             "notes": self.notes,
             "project_id": self.project_id,
+            "has_warnings": self.has_warnings,
+            "warning_count": self.warning_count,
+            "warning_codes": self.warning_codes,
+            "has_blocking_warnings": self.has_blocking_warnings,
+            "last_validated_at": self.last_validated_at,
         }
 
 
@@ -138,7 +149,7 @@ class DatabaseManager:
     """
 
     # Schema version for migrations
-    SCHEMA_VERSION = 3  # Bumped for tenant-scoped project mapping support
+    SCHEMA_VERSION = 4  # Added invoice validation warning persistence
     
     def __init__(self, db_path: str = "data/invoices.db"):
         """
@@ -268,6 +279,31 @@ class DatabaseManager:
                 ON audit_log(tenant_id)
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS invoice_validation_warnings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL,
+                    invoice_id INTEGER NOT NULL,
+                    nav_invoice_number TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    pointer TEXT,
+                    severity TEXT NOT NULL,
+                    is_blocking INTEGER DEFAULT 0,
+                    source TEXT DEFAULT 'PRE_VALIDATION',
+                    validated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_validation_warnings_invoice
+                ON invoice_validation_warnings(tenant_id, invoice_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_validation_warnings_code
+                ON invoice_validation_warnings(tenant_id, code)
+            """)
+
             # Schema version tracking
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schema_info (
@@ -316,6 +352,31 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_projects_tenant_code
             ON projects(tenant_id, project_code)
         """)
+        if not self._table_exists(cursor, "invoice_validation_warnings"):
+            cursor.execute("""
+                CREATE TABLE invoice_validation_warnings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL,
+                    invoice_id INTEGER NOT NULL,
+                    nav_invoice_number TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    pointer TEXT,
+                    severity TEXT NOT NULL,
+                    is_blocking INTEGER DEFAULT 0,
+                    source TEXT DEFAULT 'PRE_VALIDATION',
+                    validated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+                )
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_validation_warnings_invoice
+            ON invoice_validation_warnings(tenant_id, invoice_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_validation_warnings_code
+            ON invoice_validation_warnings(tenant_id, code)
+        """)
 
     @staticmethod
     def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
@@ -336,16 +397,42 @@ class DatabaseManager:
         return """
             SELECT
                 i.*,
+                COALESCE(vw.warning_count, 0) AS warning_count,
+                CASE WHEN COALESCE(vw.warning_count, 0) > 0 THEN 1 ELSE 0 END AS has_warnings,
+                COALESCE(vw.warning_codes, '') AS warning_codes,
+                COALESCE(vw.has_blocking_warnings, 0) AS has_blocking_warnings,
+                vw.last_validated_at,
                 p.project_code,
                 p.project_name,
                 p.aliases AS project_aliases,
                 p.reference_patterns AS project_reference_patterns,
                 p.is_active AS project_is_active
             FROM invoices i
+            LEFT JOIN (
+                SELECT
+                    tenant_id,
+                    invoice_id,
+                    COUNT(*) AS warning_count,
+                    GROUP_CONCAT(DISTINCT code) AS warning_codes,
+                    MAX(CASE WHEN is_blocking = 1 THEN 1 ELSE 0 END) AS has_blocking_warnings,
+                    MAX(validated_at) AS last_validated_at
+                FROM invoice_validation_warnings
+                GROUP BY tenant_id, invoice_id
+            ) vw
+                ON i.id = vw.invoice_id
+               AND i.tenant_id = vw.tenant_id
             LEFT JOIN projects p
                 ON i.project_id = p.id
                AND i.tenant_id = p.tenant_id
         """
+
+    @staticmethod
+    def _normalize_invoice_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize computed invoice metadata for API consumers."""
+        row["has_warnings"] = bool(row.get("has_warnings"))
+        row["has_blocking_warnings"] = bool(row.get("has_blocking_warnings"))
+        row["warning_count"] = int(row.get("warning_count", 0) or 0)
+        return row
 
     # =========================================================================
     # UPSERT NAV INVOICES
@@ -593,6 +680,128 @@ class DatabaseManager:
             return True
 
     # =========================================================================
+    # VALIDATION WARNING PERSISTENCE
+    # =========================================================================
+
+    def replace_invoice_validation_warnings(
+        self,
+        tenant_id: str,
+        invoice_number: str,
+        warnings: List[Dict[str, Any]],
+        user_id: str = "system",
+        source: str = "PRE_VALIDATION",
+    ) -> int:
+        """
+        Replace persisted validation warnings for an invoice.
+
+        This keeps warning state orthogonal to the invoice lifecycle `status`.
+        Passing an empty list clears previously stored warnings.
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id FROM invoices
+                WHERE tenant_id = ? AND nav_invoice_number = ?
+                """,
+                (tenant_id, invoice_number),
+            )
+            invoice_row = cursor.fetchone()
+            if not invoice_row:
+                logger.warning(
+                    "Cannot persist validation warnings for missing invoice %s/%s",
+                    tenant_id,
+                    invoice_number,
+                )
+                return 0
+
+            invoice_id = invoice_row["id"]
+            cursor.execute(
+                """
+                DELETE FROM invoice_validation_warnings
+                WHERE tenant_id = ? AND invoice_id = ?
+                """,
+                (tenant_id, invoice_id),
+            )
+
+            inserted = 0
+            for warning in warnings:
+                cursor.execute(
+                    """
+                    INSERT INTO invoice_validation_warnings (
+                        tenant_id,
+                        invoice_id,
+                        nav_invoice_number,
+                        code,
+                        message,
+                        pointer,
+                        severity,
+                        is_blocking,
+                        source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        tenant_id,
+                        invoice_id,
+                        invoice_number,
+                        warning.get("code", ""),
+                        warning.get("message", ""),
+                        warning.get("pointer"),
+                        warning.get("severity", "WARNING"),
+                        1 if warning.get("is_blocking") else 0,
+                        source,
+                    ),
+                )
+                inserted += 1
+
+            self._log_audit(
+                cursor,
+                tenant_id,
+                invoice_id,
+                "VALIDATION_UPDATE",
+                None,
+                None,
+                json.dumps(
+                    {
+                        "invoice_number": invoice_number,
+                        "warning_count": inserted,
+                        "source": source,
+                    },
+                    ensure_ascii=True,
+                ),
+                user_id,
+            )
+            return inserted
+
+    def get_invoice_validation_warnings(
+        self,
+        tenant_id: str,
+        invoice_number: str,
+    ) -> List[Dict[str, Any]]:
+        """Return structured validation warnings persisted for an invoice."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT code, message, pointer, severity, is_blocking, source, validated_at
+                FROM invoice_validation_warnings
+                WHERE tenant_id = ? AND nav_invoice_number = ?
+                ORDER BY code, id
+                """,
+                (tenant_id, invoice_number),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+            for row in rows:
+                row["is_blocking"] = bool(row.get("is_blocking"))
+            return rows
+
+    # =========================================================================
     # QUERY MISSING INVOICES
     # =========================================================================
 
@@ -628,7 +837,7 @@ class DatabaseManager:
                 ORDER BY i.invoice_date ASC
             """, (tenant_id, cutoff_date))
 
-            return [dict(row) for row in cursor.fetchall()]
+            return [self._normalize_invoice_row(dict(row)) for row in cursor.fetchall()]
 
     def get_invoices_needing_followup(self, tenant_id: str) -> List[Dict[str, Any]]:
         """
@@ -654,7 +863,7 @@ class DatabaseManager:
                 ORDER BY i.status, i.invoice_date ASC
             """, (tenant_id,))
 
-            return [dict(row) for row in cursor.fetchall()]
+            return [self._normalize_invoice_row(dict(row)) for row in cursor.fetchall()]
 
     # =========================================================================
     # ADDITIONAL QUERY METHODS
@@ -687,7 +896,7 @@ class DatabaseManager:
                     (invoice_number,)
                 )
             row = cursor.fetchone()
-            return dict(row) if row else None
+            return self._normalize_invoice_row(dict(row)) if row else None
 
     def get_invoices_by_status(
         self,
@@ -704,7 +913,7 @@ class DatabaseManager:
                 f"{self._invoice_select_clause()} WHERE i.tenant_id = ? AND i.status = ? ORDER BY i.invoice_date",
                 (tenant_id, status.value)
             )
-            return [dict(row) for row in cursor.fetchall()]
+            return [self._normalize_invoice_row(dict(row)) for row in cursor.fetchall()]
 
     def get_invoices_by_vendor(
         self,
@@ -721,7 +930,7 @@ class DatabaseManager:
                 f"{self._invoice_select_clause()} WHERE i.tenant_id = ? AND i.vendor_tax_number = ? ORDER BY i.invoice_date DESC",
                 (tenant_id, vendor_tax_number)
             )
-            return [dict(row) for row in cursor.fetchall()]
+            return [self._normalize_invoice_row(dict(row)) for row in cursor.fetchall()]
 
     def get_statistics(self, tenant_id: str) -> Dict[str, Any]:
         """Get invoice statistics for a tenant dashboard."""
@@ -755,6 +964,18 @@ class DatabaseManager:
             """, (tenant_id,))
             stats["critical_missing"] = cursor.fetchone()[0]
 
+            cursor.execute("""
+                SELECT COUNT(DISTINCT invoice_id) FROM invoice_validation_warnings
+                WHERE tenant_id = ?
+            """, (tenant_id,))
+            stats["warning_invoices"] = cursor.fetchone()[0]
+
+            cursor.execute("""
+                SELECT COUNT(DISTINCT invoice_id) FROM invoice_validation_warnings
+                WHERE tenant_id = ? AND is_blocking = 1
+            """, (tenant_id,))
+            stats["blocking_warning_invoices"] = cursor.fetchone()[0]
+
             return stats
 
     def search_invoices(
@@ -785,7 +1006,7 @@ class DatabaseManager:
                 ORDER BY i.last_updated DESC
                 LIMIT ?
             """, params)
-            return [dict(row) for row in cursor.fetchall()]
+            return [self._normalize_invoice_row(dict(row)) for row in cursor.fetchall()]
 
     def get_invoices_requiring_project_mapping(
         self,
@@ -816,7 +1037,7 @@ class DatabaseManager:
                 params.append(limit)
 
             cursor.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
+            return [self._normalize_invoice_row(dict(row)) for row in cursor.fetchall()]
 
     # =========================================================================
     # AUDIT LOG

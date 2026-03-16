@@ -47,6 +47,7 @@ class ReconciliationConfig:
     vendor_directory: Optional[VendorDirectory] = None
     use_test_nav_api: bool = True
     project_mapping_limit: int = 25
+    prevalidation_limit: int = 25
 
 
 # =============================================================================
@@ -120,6 +121,10 @@ def run_reconciliation(
         "nav_fetched": 0,
         "inserted": 0,
         "skipped": 0,
+        "validation_attempted": 0,
+        "warnings_detected": 0,
+        "warnings_persisted": 0,
+        "warning_invoices": [],
         "project_mapping_attempted": 0,
         "project_mapping_assigned": 0,
         "project_mapping_unmatched": 0,
@@ -163,6 +168,28 @@ def run_reconciliation(
     inserted, skipped = db.upsert_nav_invoices(tenant_id, mapped, user_id=user_id)
     summary["inserted"] = inserted
     summary["skipped"] = skipped
+    invoice_numbers = [invoice["nav_invoice_number"] for invoice in mapped]
+    validated_invoice_numbers = set()
+    warning_invoice_numbers = set()
+
+    def persist_validation_findings(invoice_number: str, full_invoice: Dict[str, Any]) -> None:
+        if not isinstance(full_invoice, dict):
+            return
+        warnings = full_invoice.get("validation_warnings")
+        if not isinstance(warnings, list):
+            return
+        summary["validation_attempted"] += 1
+        summary["warnings_detected"] += len(warnings)
+        persisted = db.replace_invoice_validation_warnings(
+            tenant_id=tenant_id,
+            invoice_number=invoice_number,
+            warnings=warnings,
+            user_id=user_id,
+        )
+        summary["warnings_persisted"] += persisted
+        validated_invoice_numbers.add(invoice_number)
+        if persisted:
+            warning_invoice_numbers.add(invoice_number)
 
     # -------------------------------------------------------------------------
     # Step 2b: Best-effort project mapping from full invoice data
@@ -171,7 +198,6 @@ def run_reconciliation(
         projects = db.list_projects(tenant_id, include_inactive=False)
         if projects:
             project_mapper = ProjectMapper(config=config.project_mapper_config)
-            invoice_numbers = [invoice["nav_invoice_number"] for invoice in mapped]
             pending_mapping = db.get_invoices_requiring_project_mapping(
                 tenant_id,
                 invoice_numbers=invoice_numbers,
@@ -182,7 +208,11 @@ def run_reconciliation(
                 invoice_number = invoice_row["nav_invoice_number"]
                 summary["project_mapping_attempted"] += 1
                 try:
-                    full_invoice = nav_client.query_invoice_data(invoice_number)
+                    full_invoice = nav_client.query_invoice_data(
+                        invoice_number,
+                        validate_sept_2025=True,
+                    )
+                    persist_validation_findings(invoice_number, full_invoice)
                     line_descriptions = full_invoice.get("line_descriptions") or [
                         line.get("lineDescription", "")
                         for line in full_invoice.get("invoice_lines", [])
@@ -210,6 +240,37 @@ def run_reconciliation(
     except Exception as exc:
         summary["errors"].append(f"Project mapping setup failed: {str(exc)}")
         logger.exception("Project mapping setup failed for tenant %s", tenant_id)
+
+    # -------------------------------------------------------------------------
+    # Step 2c: Bounded pre-validation pass for remaining invoices
+    # -------------------------------------------------------------------------
+    remaining_validation_slots = max(
+        config.prevalidation_limit - len(validated_invoice_numbers),
+        0,
+    )
+    for invoice_number in invoice_numbers:
+        if remaining_validation_slots <= 0:
+            break
+        if invoice_number in validated_invoice_numbers:
+            continue
+        try:
+            full_invoice = nav_client.query_invoice_data(
+                invoice_number,
+                validate_sept_2025=True,
+            )
+            persist_validation_findings(invoice_number, full_invoice)
+            remaining_validation_slots -= 1
+        except NavApiError as exc:
+            summary["errors"].append(
+                f"Pre-validation NAV data fetch failed for {invoice_number}: {exc.code}"
+            )
+        except Exception as exc:
+            summary["errors"].append(
+                f"Pre-validation failed for {invoice_number}: {str(exc)}"
+            )
+            logger.exception("Pre-validation failed for %s", invoice_number)
+
+    summary["warning_invoices"] = sorted(warning_invoice_numbers)
 
     # -------------------------------------------------------------------------
     # Step 3: PDF scan (match and mark RECEIVED)

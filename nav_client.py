@@ -477,253 +477,10 @@ class NavClient:
         Returns:
             List of validation error messages (empty if valid)
         """
-        errors: List[str] = []
+        from invoice_prevalidator import InvoicePreValidator
 
-        try:
-            root = etree.fromstring(invoice_xml)
-            ns = NAMESPACES.get('data', '')
-
-            self._validate_completion_date_range(root, ns, errors)
-            self._validate_reverse_charge_buyer(root, ns, errors)
-            self._validate_modification_number(root, ns, errors)
-            self._validate_exchange_rate(root, ns, errors)
-            self._validate_vat_summary_and_lines(root, ns, errors)
-
-        except etree.XMLSyntaxError as e:
-            logger.warning(f"Could not parse invoice XML for validation: {e}")
-
-        return errors
-
-    # ------------------------------------------------------------------
-    # Individual Sept 2025 validation sub-checks
-    # ------------------------------------------------------------------
-
-    def _validate_completion_date_range(
-        self, root: etree.Element, ns: str, errors: List[str]
-    ) -> None:
-        """[330] Performance period end date must not precede start date."""
-        for line_elem in root.findall(".//{%s}line" % ns) or root.findall(".//line"):
-            date_from_str = (
-                line_elem.findtext(".//{%s}lineDeliveryDate" % ns)
-                or line_elem.findtext(".//lineDeliveryDate")
-            )
-            date_to_str = (
-                line_elem.findtext(".//{%s}lineDeliveryDateTo" % ns)
-                or line_elem.findtext(".//lineDeliveryDateTo")
-            )
-            if date_from_str and date_to_str and date_to_str < date_from_str:
-                line_number = (
-                    line_elem.findtext(".//{%s}lineNumber" % ns)
-                    or line_elem.findtext(".//lineNumber")
-                    or "?"
-                )
-                errors.append(
-                    f"[330] Line {line_number}: performance period end "
-                    f"({date_to_str}) precedes start ({date_from_str})"
-                )
-
-    def _validate_reverse_charge_buyer(
-        self, root: etree.Element, ns: str, errors: List[str]
-    ) -> None:
-        """[596] Domestic reverse charge requires buyer to be domestic VAT taxpayer."""
-        exemption_case = (
-            root.findtext(".//{%s}vatExemptionCase" % ns)
-            or root.findtext(".//vatExemptionCase")
-        )
-        if not exemption_case:
-            return
-
-        is_reverse_charge = exemption_case in ("AAM", "DOMESTIC_REVERSE_CHARGE")
-        if not is_reverse_charge:
-            return
-
-        buyer_vat_code = (
-            root.findtext(".//{%s}customerTaxNumber/{%s}vatCode" % (ns, ns))
-            or root.findtext(".//customerTaxNumber/vatCode")
-        )
-        buyer_taxpayer_id = (
-            root.findtext(".//{%s}customerTaxNumber/{%s}taxpayerId" % (ns, ns))
-            or root.findtext(".//customerTaxNumber/taxpayerId")
-        )
-
-        if not buyer_taxpayer_id:
-            errors.append(
-                "[596] Domestic reverse charge but buyer has no tax number"
-            )
-        elif buyer_vat_code and buyer_vat_code != "2":
-            errors.append(
-                f"[596] Domestic reverse charge but buyer vatCode={buyer_vat_code} "
-                f"(expected '2' for domestic VAT taxpayer)"
-            )
-
-    def _validate_modification_number(
-        self, root: etree.Element, ns: str, errors: List[str]
-    ) -> None:
-        """[560] Modification invoice number must differ from original."""
-        invoice_number = (
-            root.findtext(".//{%s}invoiceNumber" % ns)
-            or root.findtext(".//invoiceNumber")
-        )
-        original_invoice_number = (
-            root.findtext(".//{%s}originalInvoiceNumber" % ns)
-            or root.findtext(".//originalInvoiceNumber")
-        )
-        if (
-            invoice_number
-            and original_invoice_number
-            and invoice_number == original_invoice_number
-        ):
-            errors.append(
-                f"[560] Modification invoice number '{invoice_number}' is "
-                f"identical to original invoice number"
-            )
-
-    def _validate_exchange_rate(
-        self, root: etree.Element, ns: str, errors: List[str]
-    ) -> None:
-        """[1300/1310] Exchange rate sanity checks for foreign-currency invoices."""
-        currency = (
-            root.findtext(".//{%s}currencyCode" % ns)
-            or root.findtext(".//currencyCode")
-        )
-        if not currency or currency == "HUF":
-            return
-
-        rate_str = (
-            root.findtext(".//{%s}exchangeRate" % ns)
-            or root.findtext(".//exchangeRate")
-        )
-        if not rate_str:
-            return
-
-        try:
-            rate = float(rate_str)
-        except (ValueError, TypeError):
-            return
-
-        net_huf_str = (
-            root.findtext(".//{%s}invoiceNetAmountHUF" % ns)
-            or root.findtext(".//invoiceNetAmountHUF")
-        )
-        net_str = (
-            root.findtext(".//{%s}invoiceNetAmount" % ns)
-            or root.findtext(".//invoiceNetAmount")
-        )
-
-        if net_huf_str and net_str:
-            try:
-                net_huf = float(net_huf_str)
-                net = float(net_str)
-                if net > 0:
-                    implied_rate = net_huf / net
-                    if abs(implied_rate - rate) > rate * 0.1:
-                        errors.append(
-                            f"[1300] Exchange rate {rate} does not match "
-                            f"HUF/foreign ratio {implied_rate:.4f} "
-                            f"(net_HUF={net_huf:.2f}, net={net:.2f})"
-                        )
-            except (ValueError, TypeError, ZeroDivisionError):
-                pass
-
-        if rate <= 0.1 or rate > 100_000:
-            errors.append(
-                f"[1310] Extreme exchange rate value: {rate} for {currency}"
-            )
-
-    def _validate_vat_summary_and_lines(
-        self, root: etree.Element, ns: str, errors: List[str]
-    ) -> None:
-        """[734] VAT summary vs line items and [1311] per-line VAT calculation."""
-        vat_summary_total = 0.0
-        line_item_vat_total = 0.0
-
-        for vat_rate_elem in root.findall(".//{%s}summaryByVatRate" % ns):
-            vat_amount = vat_rate_elem.findtext(".//{%s}vatRateVatAmount" % ns)
-            if vat_amount:
-                try:
-                    vat_summary_total += float(vat_amount)
-                except ValueError:
-                    pass
-
-        for vat_rate_elem in root.findall(".//summaryByVatRate"):
-            vat_amount = vat_rate_elem.findtext(".//vatRateVatAmount")
-            if vat_amount:
-                try:
-                    vat_summary_total += float(vat_amount)
-                except ValueError:
-                    pass
-
-        for line_elem in root.findall(".//{%s}line" % ns):
-            self._validate_line_item(line_elem, errors)
-
-        for line_elem in root.findall(".//line"):
-            line_item_vat_total += self._validate_line_item(line_elem, errors)
-
-        if vat_summary_total > 0 and line_item_vat_total > 0:
-            difference = abs(vat_summary_total - line_item_vat_total)
-            if difference > 1.0:
-                errors.append(
-                    f"[734] VAT summary mismatch: line items total {line_item_vat_total:.2f}, "
-                    f"summary shows {vat_summary_total:.2f} (diff: {difference:.2f} HUF)"
-                )
-
-    def _validate_line_item(self, line_elem: etree.Element, errors: List[str]) -> float:
-        """
-        Validate a single line item's VAT calculation.
-
-        Args:
-            line_elem: XML element for the line item
-            errors: List to append error messages to
-
-        Returns:
-            VAT amount for this line item
-        """
-        vat_amount = 0.0
-
-        try:
-            # Try to extract values with and without namespace
-            net_amount_str = (
-                line_elem.findtext(".//{%s}lineNetAmount" % NAMESPACES.get('data', '')) or
-                line_elem.findtext(".//lineNetAmount") or
-                line_elem.findtext(".//{%s}lineNetAmountData/{%s}lineNetAmount" % (
-                    NAMESPACES.get('data', ''), NAMESPACES.get('data', ''))) or
-                "0"
-            )
-
-            vat_amount_str = (
-                line_elem.findtext(".//{%s}lineVatAmount" % NAMESPACES.get('data', '')) or
-                line_elem.findtext(".//lineVatAmount") or
-                line_elem.findtext(".//{%s}lineVatData/{%s}lineVatAmount" % (
-                    NAMESPACES.get('data', ''), NAMESPACES.get('data', ''))) or
-                "0"
-            )
-
-            vat_rate_str = (
-                line_elem.findtext(".//{%s}vatPercentage" % NAMESPACES.get('data', '')) or
-                line_elem.findtext(".//vatPercentage") or
-                "0"
-            )
-
-            net_amount = float(net_amount_str)
-            vat_amount = float(vat_amount_str)
-            vat_rate = float(vat_rate_str)
-
-            # Validate calculation (Error 1311)
-            if net_amount > 0 and vat_rate > 0:
-                expected_vat = net_amount * (vat_rate / 100.0)
-                difference = abs(expected_vat - vat_amount)
-
-                if difference > 1.0:  # 1 HUF tolerance
-                    line_number = line_elem.findtext(".//lineNumber") or "?"
-                    errors.append(
-                        f"[1311] Line {line_number} VAT error: {net_amount:.2f} * {vat_rate}% = "
-                        f"{expected_vat:.2f}, but shows {vat_amount:.2f}"
-                    )
-
-        except (ValueError, TypeError) as e:
-            logger.debug(f"Could not validate line item: {e}")
-
-        return vat_amount
+        findings = InvoicePreValidator(NAMESPACES).validate_sept_2025_rules(invoice_xml)
+        return InvoicePreValidator.format_findings(findings)
 
     def manage_invoice(
         self,
@@ -864,7 +621,11 @@ class NavClient:
             pretty_print=True
         )
 
-    def _parse_invoice_data_response(self, response_xml: bytes) -> Dict[str, Any]:
+    def _parse_invoice_data_response(
+        self,
+        response_xml: bytes,
+        validate_sept_2025: bool = False,
+    ) -> Dict[str, Any]:
         """
         Parse XML response from queryInvoiceData endpoint.
 
@@ -888,6 +649,16 @@ class NavClient:
             try:
                 result['invoice_data_decoded'] = base64.b64decode(invoice_data_elem.text)
                 result.update(self._parse_decoded_invoice_xml(result['invoice_data_decoded']))
+                if validate_sept_2025:
+                    from invoice_prevalidator import InvoicePreValidator
+
+                    findings = InvoicePreValidator(NAMESPACES).validate_sept_2025_rules(
+                        result['invoice_data_decoded']
+                    )
+                    result['validation_warnings'] = [finding.to_dict() for finding in findings]
+                    result['validation_warning_codes'] = [finding.code for finding in findings]
+                    result['validation_warning_count'] = len(findings)
+                    result['has_validation_warnings'] = bool(findings)
             except Exception as e:
                 logger.warning(f"Failed to decode invoice data: {e}")
 
@@ -1091,7 +862,8 @@ class NavClient:
     def query_invoice_data(
         self,
         invoice_number: str,
-        invoice_direction: str = "INBOUND"
+        invoice_direction: str = "INBOUND",
+        validate_sept_2025: bool = False,
     ) -> Dict[str, Any]:
         """
         Retrieve complete invoice data by invoice number.
@@ -1099,6 +871,7 @@ class NavClient:
         Args:
             invoice_number: The invoice number to retrieve
             invoice_direction: "INBOUND" or "OUTBOUND"
+            validate_sept_2025: If True, attach local pre-validation findings
 
         Returns:
             Dictionary containing 'invoice_data_decoded' (bytes) and other metadata
@@ -1109,7 +882,10 @@ class NavClient:
         )
 
         response = self._execute_with_retry("/queryInvoiceData", request_body)
-        return self._parse_invoice_data_response(response)
+        return self._parse_invoice_data_response(
+            response,
+            validate_sept_2025=validate_sept_2025,
+        )
 
     def query_incoming_invoices(
         self,

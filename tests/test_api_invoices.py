@@ -108,6 +108,11 @@ class TestListInvoices:
                 "project_id": 11,
                 "project_code": "PRJ-001",
                 "project_name": "Pilot Project",
+                "has_warnings": True,
+                "warning_count": 2,
+                "warning_codes": "330,435",
+                "has_blocking_warnings": True,
+                "last_validated_at": "2024-01-20T11:00:00",
             }
         ]
         resp = client.get("/api/v1/invoices", headers=_auth(accountant_token))
@@ -116,6 +121,9 @@ class TestListInvoices:
         assert data["count"] == 1
         assert data["items"][0]["nav_invoice_number"] == "INV-001"
         assert data["items"][0]["project_code"] == "PRJ-001"
+        assert data["items"][0]["has_warnings"] is True
+        assert data["items"][0]["warning_count"] == 2
+        assert data["items"][0]["has_blocking_warnings"] is True
 
     def test_list_with_status_filter(self, client, accountant_token, mock_db):
         mock_db.get_invoices_by_status.return_value = []
@@ -140,7 +148,12 @@ class TestListInvoices:
             headers=_auth(accountant_token),
         )
         assert resp.status_code == 200
-        mock_db.search_invoices.assert_called_once_with("t-001", "Supplier", limit=100, project_id=None)
+        mock_db.search_invoices.assert_called_once_with(
+            "t-001",
+            "Supplier",
+            limit=100,
+            project_id=None,
+        )
 
     def test_list_with_project_filter(self, client, accountant_token, mock_db):
         mock_db.search_invoices.return_value = []
@@ -149,7 +162,12 @@ class TestListInvoices:
             headers=_auth(accountant_token),
         )
         assert resp.status_code == 200
-        mock_db.search_invoices.assert_called_once_with("t-001", "", limit=100, project_id=22)
+        mock_db.search_invoices.assert_called_once_with(
+            "t-001",
+            "",
+            limit=100,
+            project_id=22,
+        )
 
     def test_list_requires_auth(self, client):
         resp = client.get("/api/v1/invoices")
@@ -167,14 +185,28 @@ class TestListInvoices:
 
 class TestSyncInvoices:
     @patch("reconciliation_engine.run_reconciliation")
-    def test_sync_success(self, mock_recon, client, accountant_token, mock_db, monkeypatch):
+    def test_sync_success(
+        self,
+        mock_recon,
+        client,
+        accountant_token,
+        mock_db,
+        monkeypatch,
+    ):
         monkeypatch.setenv("NAV_TECHNICAL_USER", "testuser")
         monkeypatch.setenv("NAV_PASSWORD", "testpass")
         monkeypatch.setenv("NAV_SIGNATURE_KEY", "a" * 32)
         monkeypatch.setenv("NAV_REPLACEMENT_KEY", "b" * 32)
         monkeypatch.setenv("NAV_TAX_NUMBER", "12345678")
 
-        mock_recon.return_value = {"nav_fetched": 3, "inserted": 2}
+        mock_recon.return_value = {
+            "nav_fetched": 3,
+            "inserted": 2,
+            "validation_attempted": 2,
+            "warnings_detected": 1,
+            "warnings_persisted": 1,
+            "warning_invoices": ["INV-001"],
+        }
 
         resp = client.post(
             "/api/v1/invoices/sync",
@@ -185,6 +217,8 @@ class TestSyncInvoices:
         data = resp.json()
         assert data["status"] == "complete"
         assert data["summary"]["nav_fetched"] == 3
+        assert data["summary"]["warnings_detected"] == 1
+        assert data["summary"]["warning_invoices"] == ["INV-001"]
 
     def test_sync_no_nav_creds(self, client, accountant_token, monkeypatch):
         for key in ("NAV_TECHNICAL_USER", "NAV_LOGIN", "NAV_PASSWORD",
@@ -214,7 +248,13 @@ class TestUploadPDF:
         resp = client.post(
             "/api/v1/invoices/INV-001/upload",
             headers=_auth(accountant_token),
-            files={"file": ("Supplier_INV-001.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+            files={
+                "file": (
+                    "Supplier_INV-001.pdf",
+                    io.BytesIO(pdf_bytes),
+                    "application/pdf",
+                )
+            },
         )
         assert resp.status_code == 200
         data = resp.json()

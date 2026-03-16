@@ -68,6 +68,11 @@ class InvoiceResponse(BaseModel):
     project_id: Optional[int] = None
     project_code: Optional[str] = None
     project_name: Optional[str] = None
+    has_warnings: bool = False
+    warning_count: int = 0
+    warning_codes: Optional[str] = None
+    has_blocking_warnings: bool = False
+    last_validated_at: Optional[str] = None
 
 
 class InvoiceListResponse(BaseModel):
@@ -213,6 +218,8 @@ class InvoiceStatsBlock(BaseModel):
     total_invoices: int
     critical_missing: int
     by_status: Dict[str, Any]
+    warning_invoices: int = 0
+    blocking_warning_invoices: int = 0
 
 
 class QueueStatsBlock(BaseModel):

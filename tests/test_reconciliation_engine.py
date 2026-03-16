@@ -307,7 +307,9 @@ class TestRunReconciliation:
         mock_queue_cls,
         reconciliation_config,
     ):
-        """Project mapping assigns tenant project when line description matches."""
+        """
+        Project mapping assigns tenant project when line description matches.
+        """
         mock_nav = MagicMock()
         mock_nav.query_incoming_invoices.return_value = [
             {
@@ -346,7 +348,9 @@ class TestRunReconciliation:
 
         mock_scan_result = MagicMock()
         mock_scan_result.matched = 0
-        mock_scanner_cls.return_value.scan_folder.return_value = mock_scan_result
+        mock_scanner_cls.return_value.scan_folder.return_value = (
+            mock_scan_result
+        )
 
         summary = run_reconciliation("tenant-001", reconciliation_config)
 
@@ -371,7 +375,9 @@ class TestRunReconciliation:
         mock_queue_cls,
         reconciliation_config,
     ):
-        """Project mapping errors are captured without stopping the pipeline."""
+        """
+        Project mapping errors are captured without stopping the pipeline.
+        """
         mock_nav = MagicMock()
         mock_nav.query_incoming_invoices.return_value = [
             {
@@ -408,7 +414,9 @@ class TestRunReconciliation:
 
         mock_scan_result = MagicMock()
         mock_scan_result.matched = 0
-        mock_scanner_cls.return_value.scan_folder.return_value = mock_scan_result
+        mock_scanner_cls.return_value.scan_folder.return_value = (
+            mock_scan_result
+        )
 
         summary = run_reconciliation("tenant-001", reconciliation_config)
 
@@ -416,6 +424,80 @@ class TestRunReconciliation:
         assert summary["project_mapping_assigned"] == 0
         assert any("Project mapping failed for INV-001" in err for err in summary["errors"])
         mock_db.assign_project_to_invoice.assert_not_called()
+
+    @patch("reconciliation_engine.ApprovalQueue")
+    @patch("reconciliation_engine.PDFScanner")
+    @patch("reconciliation_engine.DatabaseManager")
+    @patch("reconciliation_engine.NavClient")
+    def test_prevalidation_persists_warning_summary(
+        self,
+        mock_nav_client_cls,
+        mock_db_cls,
+        mock_scanner_cls,
+        mock_queue_cls,
+        reconciliation_config,
+    ):
+        """
+        Inbound pre-validation findings are persisted and exposed in summary.
+        """
+        mock_nav = MagicMock()
+        mock_nav.query_incoming_invoices.return_value = [
+            {
+                "invoiceNumber": "INV-001",
+                "supplierName": "Vendor",
+                "supplierTaxNumber": "12345678",
+                "invoiceIssueDate": "2024-01-10",
+                "currency": "HUF",
+                "invoiceNetAmountHUF": 100000.0,
+                "invoiceVatAmountHUF": 27000.0,
+            },
+        ]
+        mock_nav.query_invoice_data.return_value = {
+            "line_descriptions": [],
+            "validation_warnings": [
+                {
+                    "code": "330",
+                    "message": "Line 1 date range invalid",
+                    "severity": "ERROR",
+                    "is_blocking": True,
+                },
+                {
+                    "code": "435",
+                    "message": (
+                        "Taxable VAT rates inconsistent with buyer "
+                        "vatCode=1"
+                    ),
+                    "severity": "WARNING",
+                    "is_blocking": False,
+                },
+            ],
+        }
+        mock_nav_client_cls.return_value = mock_nav
+
+        mock_db = MagicMock()
+        mock_db.upsert_nav_invoices.return_value = (1, 0)
+        mock_db.list_projects.return_value = []
+        mock_db.get_missing_invoices.return_value = []
+        mock_db.replace_invoice_validation_warnings.return_value = 2
+        mock_db_cls.return_value = mock_db
+
+        mock_scan_result = MagicMock()
+        mock_scan_result.matched = 0
+        mock_scanner_cls.return_value.scan_folder.return_value = (
+            mock_scan_result
+        )
+
+        summary = run_reconciliation("tenant-001", reconciliation_config)
+
+        assert summary["validation_attempted"] == 1
+        assert summary["warnings_detected"] == 2
+        assert summary["warnings_persisted"] == 2
+        assert summary["warning_invoices"] == ["INV-001"]
+        mock_nav.query_invoice_data.assert_called_once_with(
+            "INV-001",
+            validate_sept_2025=True,
+        )
+        mock_db.replace_invoice_validation_warnings.assert_called_once()
 
 
 # =============================================================================
@@ -436,3 +518,4 @@ class TestReconciliationConfig:
         assert config.days_old == 0
         assert config.db_path == "data/invoices.db"
         assert config.use_test_nav_api is True
+        assert config.prevalidation_limit == 25
