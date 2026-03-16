@@ -41,6 +41,7 @@ class ApprovalStatus(Enum):
     APPROVED = "approved"     # Approved, ready to send
     REJECTED = "rejected"     # Rejected, will not send
     SENT = "sent"             # Already sent
+    CLOSED = "closed"         # Upload completed / lifecycle resolved
     EXPIRED = "expired"       # Review period expired
     EDITED = "edited"         # Content was edited before approval
 
@@ -585,6 +586,81 @@ class ApprovalQueue:
             )
 
         return True
+
+    def close_item(
+        self,
+        item_id: str,
+        user_id: str = "system",
+        notes: Optional[str] = None,
+    ) -> bool:
+        """Close a sent queue item after the invoice is resolved."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT status FROM approval_queue WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+
+            if not row or row["status"] != ApprovalStatus.SENT.value:
+                return False
+
+            conn.execute(
+                """
+                UPDATE approval_queue
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (ApprovalStatus.CLOSED.value, datetime.now(), item_id),
+            )
+
+            self._log_action(
+                conn,
+                item_id,
+                "close",
+                user_id,
+                notes,
+                ApprovalStatus.SENT.value,
+                ApprovalStatus.CLOSED.value,
+            )
+
+        return True
+
+    def close_for_invoice(
+        self,
+        tenant_id: str,
+        invoice_number: str,
+        user_id: str = "system",
+        notes: Optional[str] = None,
+    ) -> int:
+        """Close all sent queue items for a tenant invoice."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM approval_queue
+                WHERE tenant_id = ? AND invoice_number = ? AND status = ?
+                """,
+                (tenant_id, invoice_number, ApprovalStatus.SENT.value),
+            ).fetchall()
+
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE approval_queue
+                    SET status = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (ApprovalStatus.CLOSED.value, datetime.now(), row["id"]),
+                )
+                self._log_action(
+                    conn,
+                    row["id"],
+                    "close",
+                    user_id,
+                    notes,
+                    ApprovalStatus.SENT.value,
+                    ApprovalStatus.CLOSED.value,
+                )
+
+        return len(rows)
 
     def expire_old_items(self) -> int:
         """Expire items past their expiration time. Returns count expired."""

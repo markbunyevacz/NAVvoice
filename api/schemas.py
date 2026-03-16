@@ -209,6 +209,22 @@ class ApprovalActionResponse(BaseModel):
     detail: str
 
 
+class ApprovedSendItemResponse(BaseModel):
+    item_id: str
+    invoice_number: str
+    status: str
+    detail: str
+    upload_url: Optional[str] = None
+
+
+class ApprovedSendResponse(BaseModel):
+    processed: int
+    sent: int
+    failed: int
+    skipped: int
+    items: List[ApprovedSendItemResponse]
+
+
 # ---------------------------------------------------------------------------
 # Stats
 # ---------------------------------------------------------------------------

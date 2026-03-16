@@ -11,13 +11,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from auth import User, Permission
 from approval_queue import ApprovalQueue
-from api.deps import get_approval_queue, require_permission
+from approval_sender import send_approved_queue_items
+from database_manager import DatabaseManager
+from api.deps import get_approval_queue, get_db, require_permission
 from api.schemas import (
     QueueItemResponse,
     ApprovalListResponse,
     ApproveRequest,
     RejectRequest,
     ApprovalActionResponse,
+    ApprovedSendResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,3 +98,21 @@ def reject_item(
         new_status="rejected",
         detail="Email rejected",
     )
+
+
+@router.post("/send-approved", response_model=ApprovedSendResponse)
+def send_approved(
+    limit: int = Query(50, ge=1, le=200),
+    user: User = Depends(require_permission(Permission.APPROVE_EMAILS)),
+    queue: ApprovalQueue = Depends(get_approval_queue),
+    db: DatabaseManager = Depends(get_db),
+):
+    """Send approved emails for the authenticated tenant."""
+    summary = send_approved_queue_items(
+        queue=queue,
+        db=db,
+        user_id=user.id,
+        tenant_id=user.tenant_id,
+        limit=limit,
+    )
+    return ApprovedSendResponse(**summary)

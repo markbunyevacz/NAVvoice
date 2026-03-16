@@ -207,7 +207,11 @@ class NavClient:
         """
         self.credentials = credentials
         self.base_url = NAV_API_TEST_URL if use_test_api else NAV_API_BASE_URL
-        self.software_id = software_id or os.getenv("NAV_SOFTWARE_ID")
+        self.software_id = (
+            software_id
+            or os.getenv("NAV_SOFTWARE_ID")
+            or ("LOCAL-TEST-SOFTWARE-ID" if use_test_api else None)
+        )
         if not self.software_id:
             raise ValueError(
                 "NAV_SOFTWARE_ID not configured. "

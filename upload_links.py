@@ -1,26 +1,18 @@
 """
-Tenant-Scoped Upload Link Generation and Validation
+DB-backed upload link generation and validation.
 
-Generates HMAC-signed, time-limited tokens that vendors can use to upload
-invoice PDFs without authenticating.  The token encodes the tenant ID,
-invoice number, and an expiry timestamp; the HMAC prevents tampering.
-
-Usage:
-    link = generate_upload_link(
-        base_url="https://app.navvoice.hu",
-        tenant_id="t-001",
-        invoice_number="INV-2024-001",
-        secret="my-secret-key",
-    )
-    # link = "https://app.navvoice.hu/api/v1/public/upload/t-001/<token>"
+Vendors receive a one-time, time-limited link that maps to a row in the
+main database. The token itself is opaque random data; the server validates
+its lifecycle state from persisted metadata.
 """
 
-import base64
-import hashlib
-import hmac
 import logging
-import time
+import os
+import secrets
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
+
+from database_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -28,122 +20,113 @@ DEFAULT_EXPIRY_HOURS = 168  # 7 days
 
 
 def generate_upload_token(
+) -> str:
+    """Create an opaque token suitable for URL-safe public links."""
+    return secrets.token_urlsafe(24)
+
+
+def get_upload_link_expiry_hours() -> int:
+    """Read and sanitize upload token expiry configuration."""
+    raw = os.getenv(
+        "UPLOAD_LINK_EXPIRY_HOURS",
+        str(DEFAULT_EXPIRY_HOURS),
+    ).strip()
+    try:
+        hours = int(raw)
+    except ValueError:
+        logger.warning("Invalid UPLOAD_LINK_EXPIRY_HOURS=%r, using default", raw)
+        return DEFAULT_EXPIRY_HOURS
+    return max(1, hours)
+
+
+def create_upload_link(
+    db: DatabaseManager,
+    base_url: str,
     tenant_id: str,
     invoice_number: str,
-    secret: str,
-    expires_hours: int = DEFAULT_EXPIRY_HOURS,
-) -> str:
+    queue_item_id: Optional[str] = None,
+    vendor_email: Optional[str] = None,
+    created_by: str = "system",
+    expires_hours: Optional[int] = None,
+) -> Dict[str, Any]:
     """
-    Create an HMAC-SHA256 signed token encoding tenant, invoice, and expiry.
-
-    Token format: ``<base64url(payload)>.<signature_hex[:16]>``
-
-    Args:
-        tenant_id: Tenant identifier.
-        invoice_number: NAV invoice number.
-        secret: Server-side signing secret.
-        expires_hours: Hours until the token expires (default 168 = 7 days).
-
-    Returns:
-        URL-safe token string.
+    Persist a one-time upload token and return its public URL plus metadata.
     """
-    expiry = int(time.time()) + expires_hours * 3600
-    payload = f"{tenant_id}:{invoice_number}:{expiry}"
-    sig = hmac.new(
-        secret.encode("utf-8"),
-        payload.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()[:16]
-    encoded = base64.urlsafe_b64encode(
-        payload.encode("utf-8"),
-    ).decode("ascii").rstrip("=")
-    return f"{encoded}.{sig}"
+    token = generate_upload_token()
+    ttl_hours = (
+        expires_hours
+        if expires_hours is not None
+        else get_upload_link_expiry_hours()
+    )
+    expires_at = datetime.now() + timedelta(hours=ttl_hours)
+    token_row = db.create_upload_token(
+        tenant_id=tenant_id,
+        invoice_number=invoice_number,
+        token=token,
+        expires_at=expires_at,
+        queue_item_id=queue_item_id,
+        vendor_email=vendor_email,
+        created_by=created_by,
+    )
+    return {
+        "token": token,
+        "url": generate_upload_link(base_url, tenant_id, token),
+        "expires_at": token_row.get("expires_at", expires_at),
+        "invoice_number": invoice_number,
+        "tenant_id": tenant_id,
+    }
 
 
 def validate_upload_token(
+    db: DatabaseManager,
     token: str,
-    secret: str,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Validate and decode an upload token.
-
-    Returns:
-        Dict with ``tenant_id``, ``invoice_number``, ``expiry`` on success,
-        or ``None`` if the token is invalid, expired, or tampered with.
-    """
-    if not token or "." not in token:
+    """Validate a persisted upload token and enforce one-time lifecycle rules."""
+    token_row = db.get_upload_token(token)
+    if token_row is None:
+        logger.info("Upload token not found")
         return None
 
-    parts = token.split(".", 1)
-    if len(parts) != 2:
+    expires_at = token_row.get("expires_at")
+    if isinstance(expires_at, str):
+        try:
+            expires_at_dt = datetime.fromisoformat(expires_at)
+        except ValueError:
+            logger.warning("Upload token expiry parse failed for %s", token)
+            return None
+    else:
+        if not isinstance(expires_at, datetime):
+            return None
+        expires_at_dt = expires_at
+
+    if expires_at_dt is None or datetime.now() > expires_at_dt:
+        logger.info(
+            "Upload token expired for %s / %s",
+            token_row.get("tenant_id"),
+            token_row.get("invoice_number"),
+        )
+        return None
+    if token_row.get("used_at") is not None:
+        logger.info(
+            "Upload token already used for %s",
+            token_row.get("invoice_number"),
+        )
+        return None
+    if token_row.get("invalidated_at") is not None:
+        logger.info(
+            "Upload token already invalidated for %s",
+            token_row.get("invoice_number"),
+        )
         return None
 
-    encoded_payload, provided_sig = parts
-
-    try:
-        padded = encoded_payload + "=" * (-len(encoded_payload) % 4)
-        raw = padded.encode("ascii")
-        payload = base64.urlsafe_b64decode(raw).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        logger.warning("Upload token base64 decode failed")
-        return None
-
-    segments = payload.split(":")
-    if len(segments) != 3:
-        logger.warning("Upload token payload has wrong segment count")
-        return None
-
-    tenant_id, invoice_number, expiry_str = segments
-
-    try:
-        expiry = int(expiry_str)
-    except ValueError:
-        logger.warning("Upload token expiry is not an integer")
-        return None
-
-    expected_sig = hmac.new(
-        secret.encode("utf-8"),
-        payload.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()[:16]  # truncated for URL brevity
-
-    if not hmac.compare_digest(provided_sig, expected_sig):
-        logger.warning("Upload token HMAC mismatch")
-        return None
-
-    if time.time() > expiry:
-        logger.info("Upload token expired for %s / %s", tenant_id, invoice_number)
-        return None
-
-    return {
-        "tenant_id": tenant_id,
-        "invoice_number": invoice_number,
-        "expiry": expiry,
-    }
+    return token_row
 
 
 def generate_upload_link(
     base_url: str,
     tenant_id: str,
-    invoice_number: str,
-    secret: str,
-    expires_hours: int = DEFAULT_EXPIRY_HOURS,
+    token: str,
 ) -> str:
-    """
-    Build a full upload URL for inclusion in chasing emails.
-
-    Args:
-        base_url: Application root URL (e.g. ``https://app.navvoice.hu``).
-        tenant_id: Tenant identifier.
-        invoice_number: NAV invoice number.
-        secret: Server-side signing secret.
-        expires_hours: Token lifetime in hours.
-
-    Returns:
-        Full URL string.
-    """
-    token = generate_upload_token(
-        tenant_id, invoice_number, secret, expires_hours,
-    )
+    """Build the public upload page URL for a token."""
     base = base_url.rstrip("/")
     return f"{base}/api/v1/public/upload/{tenant_id}/{token}"

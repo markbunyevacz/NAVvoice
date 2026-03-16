@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from database_manager import DatabaseManager, InvoiceStatus
 from auth import AuthService, UserRole, Permission
 from approval_queue import ApprovalQueue, ApprovalStatus
+from approval_sender import send_approved_queue_items
 from pdf_scanner import PDFScanner, PDFContentExtractor
 
 
@@ -370,6 +371,79 @@ class TestFullWorkflow:
         invoice = db.get_invoice("NAV-2024-001", tenant_id)
         assert invoice["status"] == "EMAILED"
         assert invoice["email_count"] == 1
+
+
+class TestUploadLinkLifecycle:
+    """Test send -> token creation -> receive closure."""
+
+    def test_send_then_receive_closes_invoice(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "flow.db"))
+        db.initialize()
+        db.upsert_nav_invoices(
+            "tenant-001",
+            [{
+                "invoiceNumber": "INV-2024-042",
+                "supplierName": "Vendor Flow",
+                "grossAmount": 99000,
+                "invoiceDate": "2024-01-12",
+            }],
+        )
+        queue = ApprovalQueue(str(tmp_path / "approval.db"))
+        queue.initialize()
+
+        item_id = queue.add_to_queue(
+            tenant_id="tenant-001",
+            invoice_number="INV-2024-042",
+            vendor_name="Vendor Flow",
+            vendor_email="vendor@example.com",
+            email_subject="Hiányzó számla",
+            email_body="Kérjük a számlát megküldeni.",
+            amount=99000,
+            invoice_date="2024-01-12",
+            created_by="tester",
+        )
+        assert queue.approve(item_id, "tester") is True
+
+        class DummyMailer:
+            def __init__(self):
+                self.last_body = ""
+
+            def send_email(self, to_email, subject, body):
+                self.last_body = body
+                return {"success": True}
+
+        mailer = DummyMailer()
+        result = send_approved_queue_items(
+            queue=queue,
+            db=db,
+            user_id="tester",
+            tenant_id="tenant-001",
+            mailer=mailer,
+            app_base_url="https://app.navvoice.hu",
+        )
+        assert result["sent"] == 1
+        assert queue.get_item(item_id).status == ApprovalStatus.SENT
+
+        token_rows = db.get_upload_tokens_for_invoice("tenant-001", "INV-2024-042")
+        assert len(token_rows) == 1
+        token = token_rows[0]["token"]
+        assert token in mailer.last_body
+
+        assert db.mark_upload_token_used(
+            token=token,
+            tenant_id="tenant-001",
+            upload_filename="invoice.pdf",
+            upload_path=str(tmp_path / "invoice.pdf"),
+        ) is True
+        assert db.mark_as_received(
+            "tenant-001",
+            "INV-2024-042",
+            pdf_path=str(tmp_path / "invoice.pdf"),
+            user_id="vendor-upload",
+        ) is True
+
+        invoice = db.get_invoice("INV-2024-042", "tenant-001")
+        assert invoice["status"] == "RECEIVED"
 
 
 if __name__ == "__main__":

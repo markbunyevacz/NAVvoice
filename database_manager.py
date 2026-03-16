@@ -113,6 +113,43 @@ class Project:
         }
 
 
+@dataclass
+class UploadToken:
+    """Persisted vendor upload token."""
+    token: str
+    tenant_id: str
+    invoice_number: str
+    expires_at: datetime
+    queue_item_id: Optional[str] = None
+    vendor_email: Optional[str] = None
+    created_by: str = "system"
+    created_at: Optional[datetime] = None
+    used_at: Optional[datetime] = None
+    used_ip: Optional[str] = None
+    invalidated_at: Optional[datetime] = None
+    upload_filename: Optional[str] = None
+    upload_path: Optional[str] = None
+    last_error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "token": self.token,
+            "tenant_id": self.tenant_id,
+            "invoice_number": self.invoice_number,
+            "queue_item_id": self.queue_item_id,
+            "vendor_email": self.vendor_email,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "used_at": self.used_at.isoformat() if self.used_at else None,
+            "used_ip": self.used_ip,
+            "invalidated_at": self.invalidated_at.isoformat() if self.invalidated_at else None,
+            "upload_filename": self.upload_filename,
+            "upload_path": self.upload_path,
+            "last_error": self.last_error,
+        }
+
+
 # =============================================================================
 # DATABASE MANAGER
 # =============================================================================
@@ -149,7 +186,7 @@ class DatabaseManager:
     """
 
     # Schema version for migrations
-    SCHEMA_VERSION = 4  # Added invoice validation warning persistence
+    SCHEMA_VERSION = 5  # Added persisted upload token lifecycle
     
     def __init__(self, db_path: str = "data/invoices.db"):
         """
@@ -304,6 +341,37 @@ class DatabaseManager:
                 ON invoice_validation_warnings(tenant_id, code)
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS upload_tokens (
+                    token TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    invoice_number TEXT NOT NULL,
+                    queue_item_id TEXT,
+                    vendor_email TEXT,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_by TEXT DEFAULT 'system',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    used_at TIMESTAMP,
+                    used_ip TEXT,
+                    invalidated_at TIMESTAMP,
+                    upload_filename TEXT,
+                    upload_path TEXT,
+                    last_error TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_upload_tokens_tenant_invoice
+                ON upload_tokens(tenant_id, invoice_number)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_upload_tokens_expires
+                ON upload_tokens(expires_at)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_upload_tokens_queue
+                ON upload_tokens(queue_item_id)
+            """)
+
             # Schema version tracking
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schema_info (
@@ -376,6 +444,37 @@ class DatabaseManager:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_validation_warnings_code
             ON invoice_validation_warnings(tenant_id, code)
+        """)
+        if not self._table_exists(cursor, "upload_tokens"):
+            cursor.execute("""
+                CREATE TABLE upload_tokens (
+                    token TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    invoice_number TEXT NOT NULL,
+                    queue_item_id TEXT,
+                    vendor_email TEXT,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_by TEXT DEFAULT 'system',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    used_at TIMESTAMP,
+                    used_ip TEXT,
+                    invalidated_at TIMESTAMP,
+                    upload_filename TEXT,
+                    upload_path TEXT,
+                    last_error TEXT
+                )
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_upload_tokens_tenant_invoice
+            ON upload_tokens(tenant_id, invoice_number)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_upload_tokens_expires
+            ON upload_tokens(expires_at)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_upload_tokens_queue
+            ON upload_tokens(queue_item_id)
         """)
 
     @staticmethod
@@ -570,6 +669,14 @@ class DatabaseManager:
                 user_id
             )
 
+            cursor.execute("""
+                UPDATE upload_tokens
+                SET invalidated_at = COALESCE(invalidated_at, CURRENT_TIMESTAMP),
+                    last_error = COALESCE(last_error, 'Invoice marked as received')
+                WHERE tenant_id = ? AND invoice_number = ?
+                    AND used_at IS NULL AND invalidated_at IS NULL
+            """, (tenant_id, invoice_number))
+
             logger.info(f"Marked as received: {invoice_number} for tenant {tenant_id}")
             return True
 
@@ -678,6 +785,245 @@ class DatabaseManager:
             )
 
             return True
+
+    # =========================================================================
+    # VENDOR UPLOAD TOKENS
+    # =========================================================================
+
+    def create_upload_token(
+        self,
+        tenant_id: str,
+        invoice_number: str,
+        token: str,
+        expires_at: datetime,
+        queue_item_id: Optional[str] = None,
+        vendor_email: Optional[str] = None,
+        created_by: str = "system",
+    ) -> Dict[str, Any]:
+        """Persist a one-time upload token for a tenant invoice."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        if not token:
+            raise ValueError("token is required")
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO upload_tokens (
+                    token, tenant_id, invoice_number, queue_item_id, vendor_email,
+                    expires_at, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token,
+                    tenant_id,
+                    invoice_number,
+                    queue_item_id,
+                    vendor_email,
+                    expires_at,
+                    created_by,
+                ),
+            )
+            self._log_upload_event(
+                cursor,
+                tenant_id=tenant_id,
+                invoice_number=invoice_number,
+                action="UPLOAD_LINK_CREATED",
+                details=f"Upload token issued for queue item {queue_item_id or 'n/a'}",
+                user_id=created_by,
+            )
+        created = self.get_upload_token(token, tenant_id=tenant_id)
+        return created or {
+            "token": token,
+            "tenant_id": tenant_id,
+            "invoice_number": invoice_number,
+            "queue_item_id": queue_item_id,
+            "vendor_email": vendor_email,
+            "expires_at": expires_at.isoformat(),
+            "created_by": created_by,
+        }
+
+    def get_upload_token(
+        self,
+        token: str,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return a persisted upload token row."""
+        if not token:
+            return None
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if tenant_id:
+                cursor.execute(
+                    """
+                    SELECT * FROM upload_tokens
+                    WHERE token = ? AND tenant_id = ?
+                    """,
+                    (token, tenant_id),
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM upload_tokens WHERE token = ?",
+                    (token,),
+                )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_upload_tokens_for_invoice(
+        self,
+        tenant_id: str,
+        invoice_number: str,
+    ) -> List[Dict[str, Any]]:
+        """Return all persisted upload tokens for a tenant invoice."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM upload_tokens
+                WHERE tenant_id = ? AND invoice_number = ?
+                ORDER BY created_at DESC
+                """,
+                (tenant_id, invoice_number),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def invalidate_upload_tokens(
+        self,
+        tenant_id: str,
+        invoice_number: Optional[str] = None,
+        token: Optional[str] = None,
+        queue_item_id: Optional[str] = None,
+        reason: str = "Upload token invalidated",
+        user_id: str = "system",
+    ) -> int:
+        """Invalidate active upload tokens for a tenant invoice or specific token."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        if not any([invoice_number, token, queue_item_id]):
+            raise ValueError("invoice_number, token, or queue_item_id is required")
+
+        filters = ["tenant_id = ?", "used_at IS NULL", "invalidated_at IS NULL"]
+        params: List[Any] = [tenant_id]
+        if invoice_number:
+            filters.append("invoice_number = ?")
+            params.append(invoice_number)
+        if token:
+            filters.append("token = ?")
+            params.append(token)
+        if queue_item_id:
+            filters.append("queue_item_id = ?")
+            params.append(queue_item_id)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                UPDATE upload_tokens
+                SET invalidated_at = CURRENT_TIMESTAMP,
+                    last_error = COALESCE(last_error, ?)
+                WHERE {' AND '.join(filters)}
+                """,
+                [reason, *params],
+            )
+            updated = cursor.rowcount
+            if updated and invoice_number:
+                self._log_upload_event(
+                    cursor,
+                    tenant_id=tenant_id,
+                    invoice_number=invoice_number,
+                    action="UPLOAD_LINK_INVALIDATED",
+                    details=reason,
+                    user_id=user_id,
+                )
+            return updated
+
+    def mark_upload_token_used(
+        self,
+        token: str,
+        tenant_id: str,
+        upload_ip: Optional[str] = None,
+        upload_filename: Optional[str] = None,
+        upload_path: Optional[str] = None,
+        error: Optional[str] = None,
+        user_id: str = "vendor-upload",
+    ) -> bool:
+        """Mark a token as consumed after a successful upload."""
+        token_row = self.get_upload_token(token, tenant_id=tenant_id)
+        if not token_row:
+            return False
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE upload_tokens
+                SET used_at = CURRENT_TIMESTAMP,
+                    used_ip = ?,
+                    upload_filename = ?,
+                    upload_path = ?,
+                    last_error = ?
+                WHERE token = ? AND tenant_id = ?
+                    AND used_at IS NULL AND invalidated_at IS NULL
+                """,
+                (
+                    upload_ip,
+                    upload_filename,
+                    upload_path,
+                    error,
+                    token,
+                    tenant_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return False
+            self._log_upload_event(
+                cursor,
+                tenant_id=tenant_id,
+                invoice_number=token_row["invoice_number"],
+                action="UPLOAD_LINK_USED",
+                details=f"Upload completed from {upload_ip or 'unknown-ip'}",
+                user_id=user_id,
+            )
+            return True
+
+    def log_upload_attempt(
+        self,
+        token: str,
+        tenant_id: str,
+        action: str,
+        details: str,
+        upload_filename: Optional[str] = None,
+        upload_path: Optional[str] = None,
+        error: Optional[str] = None,
+        user_id: str = "vendor-upload",
+    ) -> None:
+        """Persist an upload attempt outcome for auditability."""
+        token_row = self.get_upload_token(token, tenant_id=tenant_id)
+        invoice_number = token_row["invoice_number"] if token_row else None
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if token_row:
+                cursor.execute(
+                    """
+                    UPDATE upload_tokens
+                    SET upload_filename = COALESCE(?, upload_filename),
+                        upload_path = COALESCE(?, upload_path),
+                        last_error = ?
+                    WHERE token = ? AND tenant_id = ?
+                    """,
+                    (upload_filename, upload_path, error, token, tenant_id),
+                )
+            self._log_upload_event(
+                cursor,
+                tenant_id=tenant_id,
+                invoice_number=invoice_number,
+                action=action,
+                details=details,
+                user_id=user_id,
+            )
 
     # =========================================================================
     # VALIDATION WARNING PERSISTENCE
@@ -1047,7 +1393,7 @@ class DatabaseManager:
         self,
         cursor: sqlite3.Cursor,
         tenant_id: str,
-        invoice_id: int,
+        invoice_id: Optional[int],
         action: str,
         old_status: Optional[str],
         new_status: Optional[str],
@@ -1059,6 +1405,44 @@ class DatabaseManager:
             INSERT INTO audit_log (tenant_id, invoice_id, action, old_status, new_status, details, user_id)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (tenant_id, invoice_id, action, old_status, new_status, details, user_id))
+
+    def _log_upload_event(
+        self,
+        cursor: sqlite3.Cursor,
+        tenant_id: str,
+        action: str,
+        details: str,
+        user_id: str = "system",
+        invoice_number: Optional[str] = None,
+    ) -> None:
+        """Write a tenant-scoped audit entry for upload link lifecycle events."""
+        invoice_id = None
+        old_status = None
+        new_status = None
+        if invoice_number:
+            cursor.execute(
+                """
+                SELECT id, status FROM invoices
+                WHERE tenant_id = ? AND nav_invoice_number = ?
+                """,
+                (tenant_id, invoice_number),
+            )
+            row = cursor.fetchone()
+            if row:
+                invoice_id = row["id"]
+                old_status = row["status"]
+                new_status = row["status"]
+
+        self._log_audit(
+            cursor,
+            tenant_id=tenant_id,
+            invoice_id=invoice_id,
+            action=action,
+            old_status=old_status,
+            new_status=new_status,
+            details=details,
+            user_id=user_id,
+        )
 
     def get_audit_log(
         self,

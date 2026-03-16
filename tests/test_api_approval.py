@@ -7,7 +7,7 @@ ApprovalQueue is mocked; AuthService is real (in-memory).
 import sys
 from pathlib import Path
 from datetime import datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -78,9 +78,17 @@ def mock_queue():
 
 
 @pytest.fixture
-def client(auth_service, mock_queue):
+def mock_db():
+    db = MagicMock()
+    db.initialize = MagicMock()
+    return db
+
+
+@pytest.fixture
+def client(auth_service, mock_queue, mock_db):
     app.dependency_overrides[deps.get_auth_service] = lambda: auth_service
     app.dependency_overrides[deps.get_approval_queue] = lambda: mock_queue
+    app.dependency_overrides[deps.get_db] = lambda: mock_db
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -222,3 +230,39 @@ class TestReject:
             headers=_auth(accountant_token),
         )
         assert resp.status_code == 422
+
+
+class TestSendApproved:
+    def test_send_approved_success(self, client, accountant_token):
+        with patch("api.approval.send_approved_queue_items") as mock_send:
+            mock_send.return_value = {
+                "processed": 1,
+                "sent": 1,
+                "failed": 0,
+                "skipped": 0,
+                "items": [
+                    {
+                        "item_id": "q-1",
+                        "invoice_number": "INV-001",
+                        "status": "sent",
+                        "detail": "Email sent",
+                        "upload_url": "https://example.com/upload",
+                    }
+                ],
+            }
+            resp = client.post(
+                "/api/v1/approval-queue/send-approved",
+                headers=_auth(accountant_token),
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["sent"] == 1
+        assert data["items"][0]["status"] == "sent"
+
+    def test_send_approved_forbidden_for_site_manager(self, client, site_manager_token):
+        resp = client.post(
+            "/api/v1/approval-queue/send-approved",
+            headers=_auth(site_manager_token),
+        )
+        assert resp.status_code == 403

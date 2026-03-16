@@ -1,9 +1,7 @@
-"""
-Tests for upload_links.py -- token generation, validation, and link building.
-"""
+"""Tests for persisted upload-link helpers."""
 
 import sys
-import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,163 +9,116 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from database_manager import DatabaseManager
 from upload_links import (
-    generate_upload_token,
-    validate_upload_token,
+    create_upload_link,
     generate_upload_link,
+    generate_upload_token,
+    get_upload_link_expiry_hours,
+    validate_upload_token,
 )
 
-
-SECRET = "test-secret-key-2024"
 TENANT = "t-001"
 INVOICE = "INV-2024-001"
 
 
-# =============================================================================
-# generate_upload_token
-# =============================================================================
+@pytest.fixture
+def db(tmp_path):
+    db = DatabaseManager(str(tmp_path / "upload-links.db"))
+    db.initialize()
+    db.upsert_nav_invoices(
+        TENANT,
+        [{
+            "invoiceNumber": INVOICE,
+            "supplierName": "Supplier Kft",
+            "grossAmount": 100000,
+            "invoiceDate": "2024-01-10",
+        }],
+    )
+    return db
 
 
 class TestGenerateUploadToken:
 
     def test_returns_string(self):
-        token = generate_upload_token(TENANT, INVOICE, SECRET)
-        assert isinstance(token, str)
+        assert isinstance(generate_upload_token(), str)
 
-    def test_contains_dot_separator(self):
-        token = generate_upload_token(TENANT, INVOICE, SECRET)
-        assert "." in token
-        parts = token.split(".")
-        assert len(parts) == 2
+    def test_tokens_are_random(self):
+        assert generate_upload_token() != generate_upload_token()
 
-    def test_deterministic_within_same_second(self):
-        t1 = generate_upload_token(TENANT, INVOICE, SECRET, 1)
-        t2 = generate_upload_token(TENANT, INVOICE, SECRET, 1)
-        assert t1 == t2
-
-    def test_different_secrets_produce_different_tokens(self):
-        t1 = generate_upload_token(TENANT, INVOICE, "secret-a")
-        t2 = generate_upload_token(TENANT, INVOICE, "secret-b")
-        assert t1 != t2
-
-    def test_url_safe(self):
-        token = generate_upload_token(TENANT, INVOICE, SECRET)
+    def test_token_is_url_safe(self):
+        token = generate_upload_token()
         forbidden = set(" +/=\n\r\t")
-        payload_part = token.split(".")[0]
-        assert not forbidden.intersection(payload_part)
-
-
-# =============================================================================
-# validate_upload_token
-# =============================================================================
+        assert not forbidden.intersection(token)
 
 
 class TestValidateUploadToken:
 
-    def test_valid_token(self):
-        token = generate_upload_token(TENANT, INVOICE, SECRET)
-        data = validate_upload_token(token, SECRET)
+    def test_valid_token(self, db):
+        upload = create_upload_link(db, "https://example.com", TENANT, INVOICE)
+        data = validate_upload_token(db, upload["token"])
         assert data is not None
         assert data["tenant_id"] == TENANT
         assert data["invoice_number"] == INVOICE
 
-    def test_expired_token(self):
-        token = generate_upload_token(
-            TENANT, INVOICE, SECRET, expires_hours=0,
+    def test_expired_token(self, db):
+        token = "expired-token"
+        db.create_upload_token(
+            tenant_id=TENANT,
+            invoice_number=INVOICE,
+            token=token,
+            expires_at=datetime.now() - timedelta(minutes=1),
         )
-        with patch("upload_links.time") as mock_time:
-            mock_time.time.return_value = time.time() + 1
-            data = validate_upload_token(token, SECRET)
-        assert data is None
+        assert validate_upload_token(db, token) is None
 
-    def test_wrong_secret_rejected(self):
-        token = generate_upload_token(TENANT, INVOICE, SECRET)
-        data = validate_upload_token(token, "wrong-secret")
-        assert data is None
+    def test_used_token_rejected(self, db):
+        upload = create_upload_link(db, "https://example.com", TENANT, INVOICE)
+        db.mark_upload_token_used(upload["token"], TENANT)
+        assert validate_upload_token(db, upload["token"]) is None
 
-    def test_tampered_payload_rejected(self):
-        token = generate_upload_token(TENANT, INVOICE, SECRET)
-        parts = token.split(".")
-        tampered = "dGFtcGVyZWQ=." + parts[1]
-        data = validate_upload_token(tampered, SECRET)
-        assert data is None
+    def test_invalidated_token_rejected(self, db):
+        upload = create_upload_link(db, "https://example.com", TENANT, INVOICE)
+        db.invalidate_upload_tokens(TENANT, token=upload["token"], reason="superseded")
+        assert validate_upload_token(db, upload["token"]) is None
 
-    def test_tampered_signature_rejected(self):
-        token = generate_upload_token(TENANT, INVOICE, SECRET)
-        parts = token.split(".")
-        tampered = parts[0] + ".0000000000000000"
-        data = validate_upload_token(tampered, SECRET)
-        assert data is None
-
-    def test_empty_token(self):
-        assert validate_upload_token("", SECRET) is None
-
-    def test_no_dot_token(self):
-        assert validate_upload_token("nodot", SECRET) is None
-
-    def test_bad_base64(self):
-        assert validate_upload_token("!!!.abcd", SECRET) is None
-
-    def test_wrong_segment_count(self):
-        import base64
-        payload = base64.urlsafe_b64encode(
-            b"only-two-segments",
-        ).decode()
-        assert validate_upload_token(
-            f"{payload}.abcdef0123456789", SECRET,
-        ) is None
-
-    def test_non_integer_expiry(self):
-        import base64
-        payload = base64.urlsafe_b64encode(
-            b"t-001:INV-001:not-a-number",
-        ).decode()
-        assert validate_upload_token(
-            f"{payload}.abcdef0123456789", SECRET,
-        ) is None
-
-
-# =============================================================================
-# generate_upload_link
-# =============================================================================
+    def test_missing_token_rejected(self, db):
+        assert validate_upload_token(db, "missing-token") is None
 
 
 class TestGenerateUploadLink:
 
     def test_basic_link_structure(self):
-        link = generate_upload_link(
-            "https://app.navvoice.hu",
-            TENANT, INVOICE, SECRET,
-        )
-        assert link.startswith(
-            f"https://app.navvoice.hu/api/v1/public/upload/{TENANT}/",
-        )
+        link = generate_upload_link("https://app.navvoice.hu", TENANT, "abc123")
+        assert link == "https://app.navvoice.hu/api/v1/public/upload/t-001/abc123"
 
     def test_strips_trailing_slash(self):
-        link = generate_upload_link(
-            "https://app.navvoice.hu/",
-            TENANT, INVOICE, SECRET,
-        )
+        link = generate_upload_link("https://app.navvoice.hu/", TENANT, "abc123")
         assert "//" not in link.split("://", 1)[1]
 
-    def test_token_in_link_is_valid(self):
-        link = generate_upload_link(
+    def test_create_upload_link_persists_token(self, db):
+        upload = create_upload_link(
+            db,
             "https://example.com",
-            TENANT, INVOICE, SECRET,
-        )
-        token = link.rsplit("/", 1)[-1]
-        data = validate_upload_token(token, SECRET)
-        assert data is not None
-        assert data["tenant_id"] == TENANT
-        assert data["invoice_number"] == INVOICE
-
-    def test_custom_expiry(self):
-        link = generate_upload_link(
-            "https://example.com",
-            TENANT, INVOICE, SECRET,
+            TENANT,
+            INVOICE,
+            queue_item_id="APR-1",
+            vendor_email="vendor@example.com",
+            created_by="tester",
             expires_hours=1,
         )
-        token = link.rsplit("/", 1)[-1]
-        data = validate_upload_token(token, SECRET)
-        assert data is not None
-        assert data["expiry"] <= int(time.time()) + 3601
+        assert upload["url"].startswith("https://example.com/api/v1/public/upload/t-001/")
+        token_row = db.get_upload_token(upload["token"], tenant_id=TENANT)
+        assert token_row is not None
+        assert token_row["queue_item_id"] == "APR-1"
+        assert token_row["vendor_email"] == "vendor@example.com"
+
+
+class TestExpiryConfig:
+
+    def test_env_value_used(self):
+        with patch.dict("os.environ", {"UPLOAD_LINK_EXPIRY_HOURS": "24"}):
+            assert get_upload_link_expiry_hours() == 24
+
+    def test_invalid_env_value_falls_back(self):
+        with patch.dict("os.environ", {"UPLOAD_LINK_EXPIRY_HOURS": "abc"}):
+            assert get_upload_link_expiry_hours() == 168
