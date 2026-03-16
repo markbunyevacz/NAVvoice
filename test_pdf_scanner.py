@@ -484,7 +484,7 @@ class TestPDFScanner:
         """Test scanning an empty folder."""
         scanner = PDFScanner(mock_db, scan_content=False, enable_malware_scan=False)
         
-        result = scanner.scan_folder(str(temp_pdf_dir))
+        result = scanner.scan_folder(str(temp_pdf_dir), "test-tenant")
         
         assert result.total_files == 0
         assert result.matched == 0
@@ -497,7 +497,7 @@ class TestPDFScanner:
         (temp_pdf_dir / "Vendor1_INV-001.pdf").write_bytes(b'%PDF-1.4\n%%EOF')
         (temp_pdf_dir / "Vendor2_INV-002.pdf").write_bytes(b'%PDF-1.4\n%%EOF')
         
-        result = scanner.scan_folder(str(temp_pdf_dir))
+        result = scanner.scan_folder(str(temp_pdf_dir), "test-tenant")
         
         assert result.total_files == 2
 
@@ -511,7 +511,7 @@ class TestPDFScanner:
         (temp_pdf_dir / "Vendor1_INV-001.pdf").write_bytes(b'%PDF-1.4\n%%EOF')
         (subdir / "Vendor2_INV-002.pdf").write_bytes(b'%PDF-1.4\n%%EOF')
         
-        result = scanner.scan_folder(str(temp_pdf_dir), recursive=True)
+        result = scanner.scan_folder(str(temp_pdf_dir), "test-tenant", recursive=True)
         
         assert result.total_files == 2
 
@@ -524,7 +524,7 @@ class TestPDFScanner:
         pdf_path = temp_pdf_dir / "dangerous.pdf"
         pdf_path.write_bytes(dangerous_content)
         
-        result = scanner.scan_folder(str(temp_pdf_dir))
+        result = scanner.scan_folder(str(temp_pdf_dir), "test-tenant")
         
         # Should have error due to malware detection
         assert result.errors >= 1 or result.unmatched >= 1

@@ -556,6 +556,7 @@ class PDFScanner:
     def scan_folder(
         self,
         folder_path: str,
+        tenant_id: str,
         recursive: bool = True,
         dry_run: bool = False,
         content_fallback: bool = True
@@ -569,6 +570,7 @@ class PDFScanner:
 
         Args:
             folder_path: Path to folder containing PDFs
+            tenant_id: Tenant identifier for multi-tenant data isolation
             recursive: Scan subdirectories
             dry_run: If True, don't update database
             content_fallback: Scan content if filename doesn't match
@@ -613,16 +615,16 @@ class PDFScanner:
                 matched_in_db = False
 
                 if scanned.invoice_number:
-                    invoice = self.db.get_invoice(scanned.invoice_number)
+                    invoice = self.db.get_invoice(scanned.invoice_number, tenant_id=tenant_id)
                     if invoice:
                         matched_in_db = True
 
                 # Step 2: Content fallback if filename didn't match DB
                 if not matched_in_db and content_fallback and self.content_extractor:
-                    scanned = self._scan_content(pdf_path, scanned)
+                    scanned = self._scan_content(pdf_path, scanned, tenant_id)
 
                     if scanned.invoice_number:
-                        invoice = self.db.get_invoice(scanned.invoice_number)
+                        invoice = self.db.get_invoice(scanned.invoice_number, tenant_id=tenant_id)
                         if invoice:
                             matched_in_db = True
                             if scanned.extraction_method == "ocr":
@@ -634,6 +636,7 @@ class PDFScanner:
                 if matched_in_db:
                     if not dry_run:
                         self.db.mark_as_received(
+                            tenant_id,
                             scanned.invoice_number,
                             pdf_path=str(pdf_path)
                         )
@@ -664,13 +667,16 @@ class PDFScanner:
             ocr_matches=ocr_matches
         )
 
-    def _scan_content(self, pdf_path: Path, scanned: ScannedPDF) -> ScannedPDF:
+    def _scan_content(
+        self, pdf_path: Path, scanned: ScannedPDF, tenant_id: Optional[str] = None
+    ) -> ScannedPDF:
         """
         Scan PDF content to find invoice numbers.
 
         Args:
             pdf_path: Path to PDF file
             scanned: Existing ScannedPDF from filename parsing
+            tenant_id: Optional tenant filter for database lookup
 
         Returns:
             Updated ScannedPDF with content-extracted data
@@ -685,7 +691,7 @@ class PDFScanner:
                 # Try each found invoice number against database
                 for inv_num, confidence in data["invoice_numbers"]:
                     # Check if this invoice exists in database
-                    if self.db.get_invoice(inv_num):
+                    if self.db.get_invoice(inv_num, tenant_id=tenant_id):
                         return ScannedPDF(
                             filepath=pdf_path,
                             filename=pdf_path.name,
@@ -802,9 +808,10 @@ class PDFWatcher:
     Requires: pip install watchdog
     """
 
-    def __init__(self, scanner: PDFScanner, folder: str):
+    def __init__(self, scanner: PDFScanner, folder: str, tenant_id: str = "default"):
         self.scanner = scanner
         self.folder = folder
+        self.tenant_id = tenant_id
         self._running = False
 
     def start(self):
@@ -817,19 +824,21 @@ class PDFWatcher:
             return
 
         class PDFHandler(FileSystemEventHandler):
-            def __init__(self, scanner):
+            def __init__(self, scanner, tenant_id):
                 self.scanner = scanner
+                self.tenant_id = tenant_id
 
             def on_created(self, event):
                 if event.src_path.lower().endswith('.pdf'):
                     logger.info(f"New PDF detected: {event.src_path}")
                     self.scanner.scan_folder(
                         str(Path(event.src_path).parent),
+                        self.tenant_id,
                         recursive=False
                     )
 
         observer = Observer()
-        observer.schedule(PDFHandler(self.scanner), self.folder, recursive=True)
+        observer.schedule(PDFHandler(self.scanner, self.tenant_id), self.folder, recursive=True)
         observer.start()
 
         logger.info(f"Watching {self.folder} for new PDFs...")
@@ -890,6 +899,11 @@ def main():
         action="store_true",
         help="Verbose output"
     )
+    parser.add_argument(
+        "-t", "--tenant-id",
+        default="default",
+        help="Tenant ID for multi-tenant isolation (default: default)"
+    )
 
     args = parser.parse_args()
 
@@ -908,13 +922,14 @@ def main():
 
     if args.watch:
         # Watch mode
-        watcher = PDFWatcher(scanner, args.folder)
+        watcher = PDFWatcher(scanner, args.folder, args.tenant_id)
         watcher.start()
     else:
         # One-time scan
         try:
             result = scanner.scan_folder(
                 args.folder,
+                args.tenant_id,
                 recursive=args.recursive,
                 dry_run=args.dry_run
             )
