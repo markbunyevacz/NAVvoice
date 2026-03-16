@@ -887,9 +887,7 @@ class NavClient:
             result['invoice_data_base64'] = invoice_data_elem.text
             try:
                 result['invoice_data_decoded'] = base64.b64decode(invoice_data_elem.text)
-                # Try to parse the decoded XML to get some metadata if needed
-                # decoded_xml = etree.fromstring(result['invoice_data_decoded'])
-                # result['supplier_name'] = ...
+                result.update(self._parse_decoded_invoice_xml(result['invoice_data_decoded']))
             except Exception as e:
                 logger.warning(f"Failed to decode invoice data: {e}")
 
@@ -903,6 +901,42 @@ class NavClient:
 
         return result
 
+    def _parse_decoded_invoice_xml(self, invoice_xml: bytes) -> Dict[str, Any]:
+        """Parse decoded invoice XML into a light-weight structured payload."""
+        try:
+            root = etree.fromstring(invoice_xml)
+        except etree.XMLSyntaxError as exc:
+            logger.warning(f"Failed to parse decoded invoice XML: {exc}")
+            return {}
+
+        parsed = {
+            "invoice_number": self._get_text_recursive(root, "invoiceNumber", ""),
+            "invoice_issue_date": self._get_text_recursive(root, "invoiceIssueDate", ""),
+            "supplier_name": self._get_text_recursive(root, "supplierName", ""),
+            "supplier_tax_number": self._get_text_recursive(root, "supplierTaxNumber", ""),
+            "line_descriptions": [],
+            "invoice_lines": [],
+        }
+
+        for line_elem in root.findall(".//{%s}line" % NAMESPACES['data']) or root.findall(".//line"):
+            line = {
+                "lineNumber": self._get_text(line_elem, "lineNumber", ""),
+                "lineDescription": self._get_text(line_elem, "lineDescription", ""),
+                "lineNetAmount": self._safe_float(
+                    self._get_text(line_elem, "lineNetAmount", "")
+                    or self._get_text_recursive(line_elem, "lineNetAmount", "")
+                ),
+                "lineVatAmount": self._safe_float(
+                    self._get_text(line_elem, "lineVatAmount", "")
+                    or self._get_text_recursive(line_elem, "lineVatAmount", "")
+                ),
+            }
+            parsed["invoice_lines"].append(line)
+            if line["lineDescription"]:
+                parsed["line_descriptions"].append(line["lineDescription"])
+
+        return parsed
+
     @staticmethod
     def _get_text(element: etree.Element, tag: str, default: str = "") -> str:
         """Safely extract text from child element."""
@@ -915,6 +949,14 @@ class NavClient:
             if child is not None and child.text:
                 return child.text.strip()
         return default
+
+    @staticmethod
+    def _safe_float(value: Any) -> float:
+        """Convert values to float, falling back to 0.0."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _check_response_for_errors(self, response_xml: bytes) -> None:
         """

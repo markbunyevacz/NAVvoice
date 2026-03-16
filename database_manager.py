@@ -58,6 +58,7 @@ class Invoice:
     email_count: int = 0
     pdf_path: Optional[str] = None
     notes: Optional[str] = None
+    project_id: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -74,6 +75,30 @@ class Invoice:
             "email_count": self.email_count,
             "pdf_path": self.pdf_path,
             "notes": self.notes,
+            "project_id": self.project_id,
+        }
+
+
+@dataclass
+class Project:
+    """Tenant-scoped project reference."""
+    id: Optional[int]
+    tenant_id: str
+    project_code: str
+    project_name: str
+    aliases: Optional[str] = None
+    reference_patterns: Optional[str] = None
+    is_active: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "project_code": self.project_code,
+            "project_name": self.project_name,
+            "aliases": self.aliases,
+            "reference_patterns": self.reference_patterns,
+            "is_active": self.is_active,
         }
 
 
@@ -113,7 +138,7 @@ class DatabaseManager:
     """
 
     # Schema version for migrations
-    SCHEMA_VERSION = 2  # Bumped for tenant_id addition
+    SCHEMA_VERSION = 3  # Bumped for tenant-scoped project mapping support
     
     def __init__(self, db_path: str = "data/invoices.db"):
         """
@@ -135,6 +160,7 @@ class DatabaseManager:
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
         )
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
             conn.commit()
@@ -165,8 +191,25 @@ class DatabaseManager:
                     email_count INTEGER DEFAULT 0,
                     pdf_path TEXT,
                     notes TEXT,
+                    project_id INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(tenant_id, nav_invoice_number)
+                    UNIQUE(tenant_id, nav_invoice_number),
+                    FOREIGN KEY (project_id) REFERENCES projects(id)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS projects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL,
+                    project_code TEXT NOT NULL,
+                    project_name TEXT NOT NULL,
+                    aliases TEXT,
+                    reference_patterns TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(tenant_id, project_code)
                 )
             """)
 
@@ -190,6 +233,18 @@ class DatabaseManager:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_invoices_date
                 ON invoices(invoice_date)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_invoices_tenant_project
+                ON invoices(tenant_id, project_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_projects_tenant
+                ON projects(tenant_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_projects_tenant_code
+                ON projects(tenant_id, project_code)
             """)
 
             # Audit log for compliance (GDPR 8-year retention)
@@ -220,12 +275,77 @@ class DatabaseManager:
                     value TEXT
                 )
             """)
+            self._run_migrations(cursor)
             cursor.execute("""
                 INSERT OR REPLACE INTO schema_info (key, value)
                 VALUES ('version', ?)
             """, (str(self.SCHEMA_VERSION),))
 
             logger.info("Database schema initialized with multi-tenancy support")
+
+    def _run_migrations(self, cursor: sqlite3.Cursor) -> None:
+        """Apply additive schema changes for existing databases."""
+        if not self._column_exists(cursor, "invoices", "project_id"):
+            cursor.execute("ALTER TABLE invoices ADD COLUMN project_id INTEGER")
+
+        if not self._table_exists(cursor, "projects"):
+            cursor.execute("""
+                CREATE TABLE projects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL,
+                    project_code TEXT NOT NULL,
+                    project_name TEXT NOT NULL,
+                    aliases TEXT,
+                    reference_patterns TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(tenant_id, project_code)
+                )
+            """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_invoices_tenant_project
+            ON invoices(tenant_id, project_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_projects_tenant
+            ON projects(tenant_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_projects_tenant_code
+            ON projects(tenant_id, project_code)
+        """)
+
+    @staticmethod
+    def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
+        cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        )
+        return cursor.fetchone() is not None
+
+    @staticmethod
+    def _column_exists(cursor: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return any(row["name"] == column_name for row in cursor.fetchall())
+
+    @staticmethod
+    def _invoice_select_clause() -> str:
+        """Select invoice rows with optional project metadata."""
+        return """
+            SELECT
+                i.*,
+                p.project_code,
+                p.project_name,
+                p.aliases AS project_aliases,
+                p.reference_patterns AS project_reference_patterns,
+                p.is_active AS project_is_active
+            FROM invoices i
+            LEFT JOIN projects p
+                ON i.project_id = p.id
+               AND i.tenant_id = p.tenant_id
+        """
 
     # =========================================================================
     # UPSERT NAV INVOICES
@@ -366,6 +486,70 @@ class DatabaseManager:
             logger.info(f"Marked as received: {invoice_number} for tenant {tenant_id}")
             return True
 
+    def assign_project_to_invoice(
+        self,
+        tenant_id: str,
+        invoice_number: str,
+        project_id: Optional[int],
+        user_id: str = "system"
+    ) -> bool:
+        """Assign or clear a tenant project on an invoice."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, project_id FROM invoices WHERE tenant_id = ? AND nav_invoice_number = ?",
+                (tenant_id, invoice_number)
+            )
+            invoice_row = cursor.fetchone()
+            if not invoice_row:
+                return False
+
+            old_project_id = invoice_row["project_id"]
+
+            project_code = None
+            if project_id is not None:
+                cursor.execute(
+                    """
+                    SELECT id, project_code FROM projects
+                    WHERE tenant_id = ? AND id = ? AND is_active = 1
+                    """,
+                    (tenant_id, project_id),
+                )
+                project_row = cursor.fetchone()
+                if not project_row:
+                    raise ValueError("Project not found for tenant")
+                project_id = project_row["id"]
+                project_code = project_row["project_code"]
+
+            cursor.execute(
+                """
+                UPDATE invoices
+                SET project_id = ?, last_updated = CURRENT_TIMESTAMP
+                WHERE tenant_id = ? AND nav_invoice_number = ?
+                """,
+                (project_id, tenant_id, invoice_number),
+            )
+
+            details = (
+                f"Assigned project {project_code} (id={project_id})"
+                if project_id is not None
+                else "Cleared project assignment"
+            )
+            self._log_audit(
+                cursor,
+                tenant_id,
+                invoice_row["id"],
+                "PROJECT_ASSIGNMENT",
+                str(old_project_id) if old_project_id is not None else None,
+                str(project_id) if project_id is not None else None,
+                details,
+                user_id,
+            )
+            return cursor.rowcount > 0
+
     def mark_as_emailed(
         self,
         tenant_id: str,
@@ -437,11 +621,11 @@ class DatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            cursor.execute("""
-                SELECT * FROM invoices
-                WHERE tenant_id = ? AND status = 'MISSING'
-                AND invoice_date <= ?
-                ORDER BY invoice_date ASC
+            cursor.execute(f"""
+                {self._invoice_select_clause()}
+                WHERE i.tenant_id = ? AND i.status = 'MISSING'
+                AND i.invoice_date <= ?
+                ORDER BY i.invoice_date ASC
             """, (tenant_id, cutoff_date))
 
             return [dict(row) for row in cursor.fetchall()]
@@ -462,12 +646,12 @@ class DatabaseManager:
             cursor = conn.cursor()
 
             # Missing for 5+ days OR emailed 3+ days ago (tenant-scoped)
-            cursor.execute("""
-                SELECT * FROM invoices
-                WHERE tenant_id = ?
-                AND ((status = 'MISSING' AND invoice_date <= date('now', '-5 days'))
-                   OR (status = 'EMAILED' AND last_updated <= datetime('now', '-3 days')))
-                ORDER BY status, invoice_date ASC
+            cursor.execute(f"""
+                {self._invoice_select_clause()}
+                WHERE i.tenant_id = ?
+                AND ((i.status = 'MISSING' AND i.invoice_date <= date('now', '-5 days'))
+                   OR (i.status = 'EMAILED' AND i.last_updated <= datetime('now', '-3 days')))
+                ORDER BY i.status, i.invoice_date ASC
             """, (tenant_id,))
 
             return [dict(row) for row in cursor.fetchall()]
@@ -493,13 +677,13 @@ class DatabaseManager:
 
             if tenant_id:
                 cursor.execute(
-                    "SELECT * FROM invoices WHERE tenant_id = ? AND nav_invoice_number = ?",
+                    f"{self._invoice_select_clause()} WHERE i.tenant_id = ? AND i.nav_invoice_number = ?",
                     (tenant_id, invoice_number)
                 )
             else:
                 # Cross-tenant search (admin use only)
                 cursor.execute(
-                    "SELECT * FROM invoices WHERE nav_invoice_number = ?",
+                    f"{self._invoice_select_clause()} WHERE i.nav_invoice_number = ?",
                     (invoice_number,)
                 )
             row = cursor.fetchone()
@@ -517,7 +701,7 @@ class DatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM invoices WHERE tenant_id = ? AND status = ? ORDER BY invoice_date",
+                f"{self._invoice_select_clause()} WHERE i.tenant_id = ? AND i.status = ? ORDER BY i.invoice_date",
                 (tenant_id, status.value)
             )
             return [dict(row) for row in cursor.fetchall()]
@@ -534,7 +718,7 @@ class DatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM invoices WHERE tenant_id = ? AND vendor_tax_number = ? ORDER BY invoice_date DESC",
+                f"{self._invoice_select_clause()} WHERE i.tenant_id = ? AND i.vendor_tax_number = ? ORDER BY i.invoice_date DESC",
                 (tenant_id, vendor_tax_number)
             )
             return [dict(row) for row in cursor.fetchall()]
@@ -577,7 +761,8 @@ class DatabaseManager:
         self,
         tenant_id: str,
         query: str,
-        limit: int = 50
+        limit: int = 50,
+        project_id: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """Search invoices by number or vendor name within a tenant."""
         if not tenant_id:
@@ -586,13 +771,51 @@ class DatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             search_term = f"%{query}%"
-            cursor.execute("""
-                SELECT * FROM invoices
-                WHERE tenant_id = ?
-                AND (nav_invoice_number LIKE ? OR vendor_name LIKE ?)
-                ORDER BY last_updated DESC
+            project_filter = ""
+            params: List[Any] = [tenant_id, search_term, search_term]
+            if project_id is not None:
+                project_filter = " AND i.project_id = ?"
+                params.append(project_id)
+            params.append(limit)
+            cursor.execute(f"""
+                {self._invoice_select_clause()}
+                WHERE i.tenant_id = ?
+                AND (i.nav_invoice_number LIKE ? OR i.vendor_name LIKE ?)
+                {project_filter}
+                ORDER BY i.last_updated DESC
                 LIMIT ?
-            """, (tenant_id, search_term, search_term, limit))
+            """, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_invoices_requiring_project_mapping(
+        self,
+        tenant_id: str,
+        invoice_numbers: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return invoices that still need project assignment."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            query = f"""
+                {self._invoice_select_clause()}
+                WHERE i.tenant_id = ? AND i.project_id IS NULL
+            """
+            params: List[Any] = [tenant_id]
+
+            if invoice_numbers:
+                placeholders = ", ".join("?" for _ in invoice_numbers)
+                query += f" AND i.nav_invoice_number IN ({placeholders})"
+                params.extend(invoice_numbers)
+
+            query += " ORDER BY i.invoice_date DESC"
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
 
     # =========================================================================
@@ -713,6 +936,143 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT tenant_id FROM invoices")
             return [row[0] for row in cursor.fetchall()]
+
+    # =========================================================================
+    # PROJECT MANAGEMENT
+    # =========================================================================
+
+    def list_projects(
+        self,
+        tenant_id: str,
+        include_inactive: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """List projects for a tenant."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            query = """
+                SELECT *
+                FROM projects
+                WHERE tenant_id = ?
+            """
+            params: List[Any] = [tenant_id]
+            if not include_inactive:
+                query += " AND is_active = 1"
+            query += " ORDER BY project_code ASC"
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_project(self, tenant_id: str, project_id: int) -> Optional[Dict[str, Any]]:
+        """Get a tenant-scoped project by ID."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM projects WHERE tenant_id = ? AND id = ?",
+                (tenant_id, project_id),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def create_project(
+        self,
+        tenant_id: str,
+        project_code: str,
+        project_name: str,
+        aliases: Optional[str] = None,
+        reference_patterns: Optional[str] = None,
+        is_active: bool = True,
+    ) -> Dict[str, Any]:
+        """Create a project for a tenant."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        if not project_code.strip():
+            raise ValueError("project_code is required")
+        if not project_name.strip():
+            raise ValueError("project_name is required")
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO projects (
+                    tenant_id, project_code, project_name, aliases, reference_patterns, is_active
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tenant_id,
+                    project_code.strip(),
+                    project_name.strip(),
+                    aliases,
+                    reference_patterns,
+                    1 if is_active else 0,
+                ),
+            )
+            project_id = cursor.lastrowid
+            cursor.execute(
+                "SELECT * FROM projects WHERE tenant_id = ? AND id = ?",
+                (tenant_id, project_id),
+            )
+            return dict(cursor.fetchone())
+
+    def update_project(
+        self,
+        tenant_id: str,
+        project_id: int,
+        project_code: Optional[str] = None,
+        project_name: Optional[str] = None,
+        aliases: Optional[str] = None,
+        reference_patterns: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update mutable project fields for a tenant."""
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+
+        updates: List[str] = []
+        params: List[Any] = []
+
+        if project_code is not None:
+            updates.append("project_code = ?")
+            params.append(project_code.strip())
+        if project_name is not None:
+            updates.append("project_name = ?")
+            params.append(project_name.strip())
+        if aliases is not None:
+            updates.append("aliases = ?")
+            params.append(aliases)
+        if reference_patterns is not None:
+            updates.append("reference_patterns = ?")
+            params.append(reference_patterns)
+        if is_active is not None:
+            updates.append("is_active = ?")
+            params.append(1 if is_active else 0)
+
+        if not updates:
+            return self.get_project(tenant_id, project_id)
+
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        params.extend([tenant_id, project_id])
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                UPDATE projects
+                SET {", ".join(updates)}
+                WHERE tenant_id = ? AND id = ?
+                """,
+                params,
+            )
+            if cursor.rowcount == 0:
+                return None
+
+        return self.get_project(tenant_id, project_id)
 
     def get_tenant_summary(self) -> List[Dict[str, Any]]:
         """Get summary statistics for all tenants (admin only)."""

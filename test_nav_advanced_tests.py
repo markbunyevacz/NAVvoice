@@ -5,6 +5,7 @@ Covers token exchange, integration workflows, and security tests.
 Maps to sections: TC-INT, TC-SEC, Token Exchange
 """
 
+import base64
 import pytest
 import hashlib
 from datetime import datetime, timedelta, timezone
@@ -400,6 +401,39 @@ class TestSecurity:
 
 class TestResponseMetadata:
     """Test parsing of additional response metadata fields."""
+
+    def test_query_invoice_data_parses_line_descriptions(self, nav_client, mock_session):
+        """Decoded invoice XML should expose parsed line descriptions."""
+        invoice_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <Invoice xmlns="http://schemas.nav.gov.hu/OSA/3.0/data">
+            <invoiceNumber>INV-001</invoiceNumber>
+            <invoiceLines>
+                <line>
+                    <lineNumber>1</lineNumber>
+                    <lineDescription>Munkaszam: PRJ-001</lineDescription>
+                    <lineNetAmount>10000</lineNetAmount>
+                    <lineVatAmount>2700</lineVatAmount>
+                </line>
+            </invoiceLines>
+        </Invoice>"""
+        encoded_data = base64.b64encode(invoice_xml).decode("ascii")
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.content = f"""<?xml version="1.0" encoding="UTF-8"?>
+        <QueryInvoiceDataResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api">
+            <result xmlns="http://schemas.nav.gov.hu/NTCA/1.0/common"><funcCode>OK</funcCode></result>
+            <invoiceDataResult>
+                <invoiceData>{encoded_data}</invoiceData>
+            </invoiceDataResult>
+        </QueryInvoiceDataResponse>""".encode("utf-8")
+        mock_session.post.return_value = mock_response
+        nav_client.session = mock_session
+
+        result = nav_client.query_invoice_data("INV-001", "INBOUND")
+
+        assert result["invoice_number"] == "INV-001"
+        assert result["line_descriptions"] == ["Munkaszam: PRJ-001"]
+        assert result["invoice_lines"][0]["lineNetAmount"] == 10000.0
 
     def test_electronic_invoice_hash_parsing(self, nav_client, mock_session):
         """Test that electronicInvoiceHash is correctly parsed from response."""

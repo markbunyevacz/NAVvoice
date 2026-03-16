@@ -65,6 +65,9 @@ class InvoiceResponse(BaseModel):
     email_count: int = 0
     pdf_path: Optional[str] = None
     notes: Optional[str] = None
+    project_id: Optional[int] = None
+    project_code: Optional[str] = None
+    project_name: Optional[str] = None
 
 
 class InvoiceListResponse(BaseModel):
@@ -90,6 +93,13 @@ class SyncResponse(BaseModel):
     summary: Dict[str, Any]
 
 
+class InvoiceProjectAssignmentRequest(BaseModel):
+    project_id: Optional[int] = Field(
+        None,
+        description="Tenant-scoped project ID. Use null to clear assignment.",
+    )
+
+
 class UploadResponse(BaseModel):
     filename: str
     saved_path: str
@@ -104,6 +114,45 @@ class PublicUploadResponse(BaseModel):
     matched: bool
     invoice_number: Optional[str] = None
     detail: str
+
+
+class ProjectResponse(BaseModel):
+    id: int
+    tenant_id: str
+    project_code: str
+    project_name: str
+    aliases: Optional[str] = None
+    reference_patterns: Optional[str] = None
+    is_active: bool = True
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ProjectListResponse(BaseModel):
+    items: List[ProjectResponse]
+    count: int
+
+
+class ProjectCreateRequest(BaseModel):
+    project_code: str = Field(..., min_length=1, max_length=100)
+    project_name: str = Field(..., min_length=1, max_length=200)
+    aliases: Optional[str] = Field(
+        None,
+        description="Optional aliases or free-form references for matching.",
+    )
+    reference_patterns: Optional[str] = Field(
+        None,
+        description="Optional matching hints or project reference patterns.",
+    )
+    is_active: bool = True
+
+
+class ProjectUpdateRequest(BaseModel):
+    project_code: Optional[str] = Field(None, min_length=1, max_length=100)
+    project_name: Optional[str] = Field(None, min_length=1, max_length=200)
+    aliases: Optional[str] = None
+    reference_patterns: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------

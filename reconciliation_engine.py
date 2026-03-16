@@ -22,6 +22,7 @@ from database_manager import DatabaseManager
 from pdf_scanner import PDFScanner
 from invoice_agent import InvoiceAgent, AgentConfig, VendorDirectory, EmailTone
 from approval_queue import ApprovalQueue
+from project_mapper import ProjectMapper, ProjectMapperConfig
 from upload_links import generate_upload_link
 
 logger = logging.getLogger(__name__)
@@ -42,8 +43,10 @@ class ReconciliationConfig:
     db_path: str = "data/invoices.db"
     approval_queue_path: str = "data/approvals.db"
     agent_config: Optional[AgentConfig] = None
+    project_mapper_config: Optional[ProjectMapperConfig] = None
     vendor_directory: Optional[VendorDirectory] = None
     use_test_nav_api: bool = True
+    project_mapping_limit: int = 25
 
 
 # =============================================================================
@@ -117,6 +120,9 @@ def run_reconciliation(
         "nav_fetched": 0,
         "inserted": 0,
         "skipped": 0,
+        "project_mapping_attempted": 0,
+        "project_mapping_assigned": 0,
+        "project_mapping_unmatched": 0,
         "matched": 0,
         "missing_count": 0,
         "emails_generated": 0,
@@ -157,6 +163,53 @@ def run_reconciliation(
     inserted, skipped = db.upsert_nav_invoices(tenant_id, mapped, user_id=user_id)
     summary["inserted"] = inserted
     summary["skipped"] = skipped
+
+    # -------------------------------------------------------------------------
+    # Step 2b: Best-effort project mapping from full invoice data
+    # -------------------------------------------------------------------------
+    try:
+        projects = db.list_projects(tenant_id, include_inactive=False)
+        if projects:
+            project_mapper = ProjectMapper(config=config.project_mapper_config)
+            invoice_numbers = [invoice["nav_invoice_number"] for invoice in mapped]
+            pending_mapping = db.get_invoices_requiring_project_mapping(
+                tenant_id,
+                invoice_numbers=invoice_numbers,
+                limit=config.project_mapping_limit,
+            )
+
+            for invoice_row in pending_mapping:
+                invoice_number = invoice_row["nav_invoice_number"]
+                summary["project_mapping_attempted"] += 1
+                try:
+                    full_invoice = nav_client.query_invoice_data(invoice_number)
+                    line_descriptions = full_invoice.get("line_descriptions") or [
+                        line.get("lineDescription", "")
+                        for line in full_invoice.get("invoice_lines", [])
+                    ]
+                    match = project_mapper.map_invoice_lines(line_descriptions, projects)
+                    if match.matched and match.project_id is not None:
+                        db.assign_project_to_invoice(
+                            tenant_id=tenant_id,
+                            invoice_number=invoice_number,
+                            project_id=match.project_id,
+                            user_id=user_id,
+                        )
+                        summary["project_mapping_assigned"] += 1
+                    else:
+                        summary["project_mapping_unmatched"] += 1
+                except NavApiError as exc:
+                    summary["errors"].append(
+                        f"Project mapping NAV data fetch failed for {invoice_number}: {exc.code}"
+                    )
+                except Exception as exc:
+                    summary["errors"].append(
+                        f"Project mapping failed for {invoice_number}: {str(exc)}"
+                    )
+                    logger.exception("Project mapping failed for %s", invoice_number)
+    except Exception as exc:
+        summary["errors"].append(f"Project mapping setup failed: {str(exc)}")
+        logger.exception("Project mapping setup failed for tenant %s", tenant_id)
 
     # -------------------------------------------------------------------------
     # Step 3: PDF scan (match and mark RECEIVED)

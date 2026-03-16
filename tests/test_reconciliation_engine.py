@@ -168,6 +168,8 @@ class TestRunReconciliation:
 
         mock_db = MagicMock()
         mock_db.upsert_nav_invoices.return_value = (1, 0)
+        mock_db.list_projects.return_value = []
+        mock_db.get_invoices_requiring_project_mapping.return_value = []
         mock_db.get_missing_invoices.return_value = [
             {
                 "nav_invoice_number": "INV-001",
@@ -276,6 +278,8 @@ class TestRunReconciliation:
 
         mock_db = MagicMock()
         mock_db.upsert_nav_invoices.return_value = (1, 0)
+        mock_db.list_projects.return_value = []
+        mock_db.get_invoices_requiring_project_mapping.return_value = []
         mock_db.get_missing_invoices.return_value = []
         mock_db_cls.return_value = mock_db
 
@@ -290,6 +294,128 @@ class TestRunReconciliation:
         assert summary["missing_count"] == 0
         assert summary["queue_added"] == 0
         mock_queue_cls.return_value.add_to_queue.assert_not_called()
+
+    @patch("reconciliation_engine.ApprovalQueue")
+    @patch("reconciliation_engine.PDFScanner")
+    @patch("reconciliation_engine.DatabaseManager")
+    @patch("reconciliation_engine.NavClient")
+    def test_project_mapping_assigns_when_unique_match(
+        self,
+        mock_nav_client_cls,
+        mock_db_cls,
+        mock_scanner_cls,
+        mock_queue_cls,
+        reconciliation_config,
+    ):
+        """Project mapping assigns tenant project when line description matches."""
+        mock_nav = MagicMock()
+        mock_nav.query_incoming_invoices.return_value = [
+            {
+                "invoiceNumber": "INV-001",
+                "supplierName": "Vendor",
+                "supplierTaxNumber": "12345678",
+                "invoiceIssueDate": "2024-01-10",
+                "currency": "HUF",
+                "invoiceNetAmountHUF": 100000.0,
+                "invoiceVatAmountHUF": 27000.0,
+            },
+        ]
+        mock_nav.query_invoice_data.return_value = {
+            "line_descriptions": ["Munkaszám: PRJ-001 belső kivitelezés"],
+        }
+        mock_nav_client_cls.return_value = mock_nav
+
+        mock_db = MagicMock()
+        mock_db.upsert_nav_invoices.return_value = (1, 0)
+        mock_db.list_projects.return_value = [
+            {
+                "id": 10,
+                "tenant_id": "tenant-001",
+                "project_code": "PRJ-001",
+                "project_name": "Pilot Project",
+                "aliases": "Munkaszám: PRJ-001",
+                "reference_patterns": None,
+                "is_active": 1,
+            }
+        ]
+        mock_db.get_invoices_requiring_project_mapping.return_value = [
+            {"nav_invoice_number": "INV-001"}
+        ]
+        mock_db.get_missing_invoices.return_value = []
+        mock_db_cls.return_value = mock_db
+
+        mock_scan_result = MagicMock()
+        mock_scan_result.matched = 0
+        mock_scanner_cls.return_value.scan_folder.return_value = mock_scan_result
+
+        summary = run_reconciliation("tenant-001", reconciliation_config)
+
+        assert summary["project_mapping_attempted"] == 1
+        assert summary["project_mapping_assigned"] == 1
+        mock_db.assign_project_to_invoice.assert_called_once_with(
+            tenant_id="tenant-001",
+            invoice_number="INV-001",
+            project_id=10,
+            user_id="reconciliation-engine",
+        )
+
+    @patch("reconciliation_engine.ApprovalQueue")
+    @patch("reconciliation_engine.PDFScanner")
+    @patch("reconciliation_engine.DatabaseManager")
+    @patch("reconciliation_engine.NavClient")
+    def test_project_mapping_failure_is_non_blocking(
+        self,
+        mock_nav_client_cls,
+        mock_db_cls,
+        mock_scanner_cls,
+        mock_queue_cls,
+        reconciliation_config,
+    ):
+        """Project mapping errors are captured without stopping the pipeline."""
+        mock_nav = MagicMock()
+        mock_nav.query_incoming_invoices.return_value = [
+            {
+                "invoiceNumber": "INV-001",
+                "supplierName": "Vendor",
+                "supplierTaxNumber": "12345678",
+                "invoiceIssueDate": "2024-01-10",
+                "currency": "HUF",
+                "invoiceNetAmountHUF": 100000.0,
+                "invoiceVatAmountHUF": 27000.0,
+            },
+        ]
+        mock_nav.query_invoice_data.side_effect = Exception("parse failure")
+        mock_nav_client_cls.return_value = mock_nav
+
+        mock_db = MagicMock()
+        mock_db.upsert_nav_invoices.return_value = (1, 0)
+        mock_db.list_projects.return_value = [
+            {
+                "id": 10,
+                "tenant_id": "tenant-001",
+                "project_code": "PRJ-001",
+                "project_name": "Pilot Project",
+                "aliases": None,
+                "reference_patterns": None,
+                "is_active": 1,
+            }
+        ]
+        mock_db.get_invoices_requiring_project_mapping.return_value = [
+            {"nav_invoice_number": "INV-001"}
+        ]
+        mock_db.get_missing_invoices.return_value = []
+        mock_db_cls.return_value = mock_db
+
+        mock_scan_result = MagicMock()
+        mock_scan_result.matched = 0
+        mock_scanner_cls.return_value.scan_folder.return_value = mock_scan_result
+
+        summary = run_reconciliation("tenant-001", reconciliation_config)
+
+        assert summary["project_mapping_attempted"] == 1
+        assert summary["project_mapping_assigned"] == 0
+        assert any("Project mapping failed for INV-001" in err for err in summary["errors"])
+        mock_db.assign_project_to_invoice.assert_not_called()
 
 
 # =============================================================================

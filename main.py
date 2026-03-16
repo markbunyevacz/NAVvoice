@@ -20,9 +20,11 @@ from reconciliation_engine import (
     ReconciliationConfig,
 )
 from invoice_agent import AgentConfig, VendorDirectory
+from project_mapper import ProjectMapperConfig
 
 from api.auth import router as auth_router
 from api.invoices import router as invoices_router
+from api.projects import router as projects_router
 from api.approval import router as approval_router
 from api.stats import router as stats_router
 from api.public import router as public_router
@@ -37,6 +39,7 @@ app = FastAPI(
 
 app.include_router(auth_router)
 app.include_router(invoices_router)
+app.include_router(projects_router)
 app.include_router(approval_router)
 app.include_router(stats_router)
 app.include_router(public_router)
@@ -146,8 +149,10 @@ def reconcile(
 
     agent_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     agent_config = None
+    project_mapper_config = None
     if agent_api_key:
         agent_config = AgentConfig(api_key=agent_api_key)
+        project_mapper_config = ProjectMapperConfig(api_key=agent_api_key)
 
     config = ReconciliationConfig(
         date_from=date_from,
@@ -160,6 +165,7 @@ def reconcile(
             "NAVVOICE_APPROVAL_DB_PATH", "data/approvals.db"
         ),
         agent_config=agent_config,
+        project_mapper_config=project_mapper_config,
         vendor_directory=VendorDirectory(),
         use_test_nav_api=os.getenv("NAV_USE_TEST_API", "true").lower()
         == "true",

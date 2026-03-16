@@ -7,7 +7,7 @@ DatabaseManager, reconciliation engine, and PDF scanner are mocked.
 import io
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import ANY, patch, MagicMock
 
 import pytest
 
@@ -105,6 +105,9 @@ class TestListInvoices:
                 "email_count": 0,
                 "pdf_path": None,
                 "notes": None,
+                "project_id": 11,
+                "project_code": "PRJ-001",
+                "project_name": "Pilot Project",
             }
         ]
         resp = client.get("/api/v1/invoices", headers=_auth(accountant_token))
@@ -112,6 +115,7 @@ class TestListInvoices:
         data = resp.json()
         assert data["count"] == 1
         assert data["items"][0]["nav_invoice_number"] == "INV-001"
+        assert data["items"][0]["project_code"] == "PRJ-001"
 
     def test_list_with_status_filter(self, client, accountant_token, mock_db):
         mock_db.get_invoices_by_status.return_value = []
@@ -136,7 +140,16 @@ class TestListInvoices:
             headers=_auth(accountant_token),
         )
         assert resp.status_code == 200
-        mock_db.search_invoices.assert_called_once_with("t-001", "Supplier", limit=100)
+        mock_db.search_invoices.assert_called_once_with("t-001", "Supplier", limit=100, project_id=None)
+
+    def test_list_with_project_filter(self, client, accountant_token, mock_db):
+        mock_db.search_invoices.return_value = []
+        resp = client.get(
+            "/api/v1/invoices?project_id=22",
+            headers=_auth(accountant_token),
+        )
+        assert resp.status_code == 200
+        mock_db.search_invoices.assert_called_once_with("t-001", "", limit=100, project_id=22)
 
     def test_list_requires_auth(self, client):
         resp = client.get("/api/v1/invoices")
@@ -249,3 +262,52 @@ class TestUploadPDF:
                 files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
             )
             assert resp.status_code == 200
+
+
+class TestAssignInvoiceProject:
+    def test_assign_project_success(self, client, accountant_token, mock_db):
+        mock_db.assign_project_to_invoice.return_value = True
+        mock_db.get_invoice.return_value = {
+            "id": 1,
+            "tenant_id": "t-001",
+            "nav_invoice_number": "INV-001",
+            "vendor_name": "Supplier Kft",
+            "vendor_tax_number": "12345678",
+            "amount": 100000.0,
+            "currency": "HUF",
+            "invoice_date": "2024-01-15",
+            "status": "MISSING",
+            "last_updated": "2024-01-20T10:00:00",
+            "email_count": 0,
+            "pdf_path": None,
+            "notes": None,
+            "project_id": 22,
+            "project_code": "PRJ-022",
+            "project_name": "Bridge Repair",
+        }
+
+        resp = client.patch(
+            "/api/v1/invoices/INV-001/project",
+            headers=_auth(accountant_token),
+            json={"project_id": 22},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["project_id"] == 22
+        mock_db.assign_project_to_invoice.assert_called_once_with(
+            tenant_id="t-001",
+            invoice_number="INV-001",
+            project_id=22,
+            user_id=ANY,
+        )
+
+    def test_assign_project_not_found(self, client, accountant_token, mock_db):
+        mock_db.assign_project_to_invoice.return_value = False
+
+        resp = client.patch(
+            "/api/v1/invoices/INV-404/project",
+            headers=_auth(accountant_token),
+            json={"project_id": 22},
+        )
+
+        assert resp.status_code == 404

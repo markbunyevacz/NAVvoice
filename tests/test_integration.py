@@ -95,6 +95,37 @@ class TestDatabaseMultiTenancy:
         result = db.mark_as_received("tenant-a", "INV-001", "/path/to/pdf")
         assert result is True
 
+    def test_project_assignment_is_tenant_scoped(self, db):
+        """Projects can only be assigned within the same tenant."""
+        db.upsert_nav_invoices(
+            "tenant-a",
+            [{"invoiceNumber": "INV-001", "supplierName": "Vendor", "grossAmount": 100000, "invoiceDate": "2024-01-01"}],
+        )
+        project = db.create_project("tenant-a", "PRJ-001", "Bridge Repair")
+        db.upsert_nav_invoices(
+            "tenant-b",
+            [{"invoiceNumber": "INV-001", "supplierName": "Vendor B", "grossAmount": 120000, "invoiceDate": "2024-01-02"}],
+        )
+
+        assert db.assign_project_to_invoice("tenant-a", "INV-001", project["id"]) is True
+        invoice = db.get_invoice("INV-001", "tenant-a")
+        assert invoice["project_id"] == project["id"]
+        assert invoice["project_code"] == "PRJ-001"
+
+        with pytest.raises(ValueError):
+            db.assign_project_to_invoice("tenant-b", "INV-001", project["id"])
+
+    def test_project_listing_is_tenant_scoped(self, db):
+        """Each tenant only sees their own projects."""
+        db.create_project("tenant-a", "PRJ-A", "Tenant A Project")
+        db.create_project("tenant-b", "PRJ-B", "Tenant B Project")
+
+        tenant_a_projects = db.list_projects("tenant-a")
+        tenant_b_projects = db.list_projects("tenant-b")
+
+        assert [project["project_code"] for project in tenant_a_projects] == ["PRJ-A"]
+        assert [project["project_code"] for project in tenant_b_projects] == ["PRJ-B"]
+
 
 class TestJWTAuthentication:
     """Test JWT authentication and authorization."""

@@ -20,6 +20,7 @@ from auth import User, Permission
 from database_manager import DatabaseManager, InvoiceStatus
 from api.deps import get_db, require_permission
 from api.schemas import (
+    InvoiceProjectAssignmentRequest,
     InvoiceResponse,
     InvoiceListResponse,
     SyncRequest,
@@ -40,6 +41,7 @@ def list_invoices(
     date_from: Optional[str] = Query(None, description="Earliest invoice_date YYYY-MM-DD"),
     date_to: Optional[str] = Query(None, description="Latest invoice_date YYYY-MM-DD"),
     query: Optional[str] = Query(None, description="Free-text search (invoice number / vendor)"),
+    project_id: Optional[int] = Query(None, description="Filter by assigned tenant project ID"),
     limit: int = Query(100, ge=1, le=500),
     user: User = Depends(require_permission(Permission.VIEW_INVOICES)),
     db: DatabaseManager = Depends(get_db),
@@ -48,7 +50,7 @@ def list_invoices(
     tenant_id = user.tenant_id
 
     if query:
-        rows = db.search_invoices(tenant_id, query, limit=limit)
+        rows = db.search_invoices(tenant_id, query, limit=limit, project_id=project_id)
     elif status_filter:
         if status_filter not in _VALID_STATUSES:
             raise HTTPException(
@@ -56,8 +58,10 @@ def list_invoices(
                 detail=f"Invalid status. Must be one of: {', '.join(sorted(_VALID_STATUSES))}",
             )
         rows = db.get_invoices_by_status(tenant_id, InvoiceStatus(status_filter))
+        if project_id is not None:
+            rows = [r for r in rows if r.get("project_id") == project_id]
     else:
-        rows = db.search_invoices(tenant_id, "", limit=limit)
+        rows = db.search_invoices(tenant_id, "", limit=limit, project_id=project_id)
 
     if date_from:
         rows = [r for r in rows if r.get("invoice_date", "") >= date_from]
@@ -66,6 +70,42 @@ def list_invoices(
 
     items = [InvoiceResponse(**r) for r in rows]
     return InvoiceListResponse(items=items, count=len(items))
+
+
+@router.patch("/{invoice_id}/project", response_model=InvoiceResponse)
+def assign_invoice_project(
+    invoice_id: str,
+    body: InvoiceProjectAssignmentRequest,
+    user: User = Depends(require_permission(Permission.RECONCILE_INVOICES)),
+    db: DatabaseManager = Depends(get_db),
+):
+    """Assign or clear a tenant project on an invoice."""
+    try:
+        updated = db.assign_project_to_invoice(
+            tenant_id=user.tenant_id,
+            invoice_number=invoice_id,
+            project_id=body.project_id,
+            user_id=user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invoice not found for tenant",
+        )
+
+    invoice = db.get_invoice(invoice_id, user.tenant_id)
+    if invoice is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invoice not found for tenant",
+        )
+    return InvoiceResponse(**invoice)
 
 
 @router.post("/sync", response_model=SyncResponse)
@@ -78,6 +118,7 @@ def sync_invoices(
     from nav_client import NavCredentials
     from reconciliation_engine import run_reconciliation, ReconciliationConfig
     from invoice_agent import AgentConfig, VendorDirectory
+    from project_mapper import ProjectMapperConfig
 
     body = body or SyncRequest()
     tenant_id = user.tenant_id
@@ -109,6 +150,9 @@ def sync_invoices(
 
     agent_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     agent_config = AgentConfig(api_key=agent_api_key) if agent_api_key else None
+    project_mapper_config = (
+        ProjectMapperConfig(api_key=agent_api_key) if agent_api_key else None
+    )
 
     config = ReconciliationConfig(
         date_from=date_from,
@@ -119,6 +163,7 @@ def sync_invoices(
         db_path=str(db.db_path),
         approval_queue_path=os.getenv("NAVVOICE_APPROVAL_DB_PATH", "data/approvals.db"),
         agent_config=agent_config,
+        project_mapper_config=project_mapper_config,
         vendor_directory=VendorDirectory(),
         use_test_nav_api=os.getenv("NAV_USE_TEST_API", "true").lower() == "true",
     )
